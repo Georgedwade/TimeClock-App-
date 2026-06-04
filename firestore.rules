@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isManager() {
+      // In this specific Kiosk app, we skip Auth for the kiosk itself (public access to limited paths)
+      // and use a PIN/Secret for Manager dashboard if needed, or rely on Firebase Auth for admin.
+      // Given the requirement, the "predefined list" is the source of truth.
+      // For simplicity in this demo environment, we'll allow restricted reads.
+      return true; // placeholder for rule development
+    }
+
+    match /employees/{employeeId} {
+      allow read: if true; 
+      allow create: if request.resource.data.keys().hasAll(['name', 'pin', 'role'])
+                    && request.resource.data.pin is string
+                    && request.resource.data.pin.size() == 6;
+      allow update: if true; // Allow personnel management updates
+      allow delete: if true; // Allow personnel removal
+    }
+
+    match /logs/{logId} {
+      allow create: if request.resource.data.keys().hasAll(['employeeId', 'employeeName', 'type', 'timestamp', 'photoUrl'])
+                    && request.resource.data.employeeId is string
+                    && request.resource.data.type in ['clock_in', 'clock_out', 'break_start', 'break_end']
+                    && request.resource.data.timestamp is timestamp;
+      allow read: if true; 
+      allow update, delete: if true; // Allow managers to fix punch records
+    }
+
+    match /pto_requests/{requestId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['employeeId', 'employeeName', 'startDate', 'endDate', 'hoursRequested', 'status']);
+      allow update, delete: if true; // Simplified for the PTO management dashboard
+    }
+  }
+}

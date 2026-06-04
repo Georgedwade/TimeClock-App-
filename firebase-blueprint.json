@@ -1,0 +1,63 @@
+{
+  "entities": {
+    "employee": {
+      "title": "Employee",
+      "description": "System users who clock in and out",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "pin": { "type": "string", "description": "6-digit access code" },
+        "role": { "type": "string", "enum": ["staff", "manager"] },
+        "title": { "type": "string" },
+        "ptoBalance": { "type": "number" }
+      },
+      "required": ["name", "pin", "role"]
+    },
+    "timeLog": {
+      "title": "Time Log",
+      "description": "Recorded clock-in/out events",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "type": { "type": "string", "enum": ["clock_in", "clock_out", "break_start", "break_end"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "photoUrl": { "type": "string" },
+        "note": { "type": "string" }
+      },
+      "required": ["employeeId", "type", "timestamp", "photoUrl"]
+    },
+    "ptoRequest": {
+      "title": "PTO Request",
+      "description": "Logged time off requests",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "hoursRequested": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "note": { "type": "string" },
+        "managerNote": { "type": "string" }
+      },
+      "required": ["employeeId", "employeeName", "startDate", "endDate", "hoursRequested", "status"]
+    }
+  },
+  "firestore": {
+    "/employees/{employeeId}": {
+      "schema": "employee",
+      "description": "Collection of authorized employees"
+    },
+    "/logs/{logId}": {
+      "schema": "timeLog",
+      "description": "Historical time clock events"
+    },
+    "/pto_requests/{requestId}": {
+      "schema": "ptoRequest",
+      "description": "Time off requests"
+    }
+  }
+}

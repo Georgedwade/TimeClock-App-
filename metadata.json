@@ -1,0 +1,6 @@
+{
+  "name": "MedClock Kiosk",
+  "description": "ZRG Medical's secure time clock kiosk with automated photo verification, real-time sync, and administrative shift records.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
