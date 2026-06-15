@@ -73,15 +73,20 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error', message: string } | null>(null);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
 
   useEffect(() => {
     loadEmployees();
     const unsubLogs = firebaseService.subscribeToLogs(setLogs);
     const unsubEmps = firebaseService.subscribeToEmployees(setEmployees);
+    const unsubSettings = firebaseService.subscribeToSettings((s) => {
+      setRequirePhotoVerification(s.requirePhotoVerification);
+    });
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => {
       unsubLogs();
       unsubEmps();
+      unsubSettings();
       clearInterval(timer);
     };
   }, []);
@@ -101,10 +106,39 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
     }
   };
 
-  const handleActionSelect = (action: LogType | 'PTO_REQUEST') => {
+  const handleActionSelect = async (action: LogType | 'PTO_REQUEST') => {
     setSelectedAction(action);
     if (action === 'PTO_REQUEST') {
       setShowPTOModal(true);
+    } else if (!requirePhotoVerification) {
+      if (!selectedEmployee) return;
+      setIsLoading(true);
+      try {
+        await firebaseService.addLog({
+          employeeId: selectedEmployee.id,
+          employeeName: selectedEmployee.name,
+          type: action as LogType,
+          timestamp: new Date(),
+          photoUrl: '', // No photo when verification is disabled
+        });
+
+        setFeedback({ 
+          type: 'success', 
+          message: `${selectedEmployee.name} logged ${action.replace('_', ' ')} successfully.` 
+        });
+        
+        setTimeout(() => {
+          setSelectedEmployee(null);
+          setSelectedAction(null);
+          setFeedback(null);
+        }, 3000);
+
+      } catch (err) {
+        console.error(err);
+        setFeedback({ type: 'error', message: 'Failed to save log. Please try again.' });
+      } finally {
+        setIsLoading(false);
+      }
     } else {
       setShowCamera(true);
     }

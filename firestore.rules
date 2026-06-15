@@ -46,5 +46,9 @@ service cloud.firestore {
       allow create: if request.resource.data.keys().hasAll(['employeeId', 'employeeName', 'startDate', 'endDate', 'hoursRequested', 'status']);
       allow update, delete: if true; // Simplified for the PTO management dashboard
     }
+
+    match /settings/{docId} {
+      allow read, write: if true;
+    }
   }
 }

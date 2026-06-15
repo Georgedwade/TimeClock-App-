@@ -44,6 +44,14 @@
         "managerNote": { "type": "string" }
       },
       "required": ["employeeId", "employeeName", "startDate", "endDate", "hoursRequested", "status"]
+    },
+    "systemSettings": {
+      "title": "System Settings",
+      "description": "General system configs",
+      "type": "object",
+      "properties": {
+        "requirePhotoVerification": { "type": "boolean" }
+      }
     }
   },
   "firestore": {
@@ -58,6 +66,10 @@
     "/pto_requests/{requestId}": {
       "schema": "ptoRequest",
       "description": "Time off requests"
+    },
+    "/settings/{docId}": {
+      "schema": "systemSettings",
+      "description": "System-wide feature configurations"
     }
   }
 }

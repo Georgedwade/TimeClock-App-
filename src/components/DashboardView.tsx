@@ -657,7 +657,7 @@ interface DashboardViewProps {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
-  const [activeTab, setActiveTab] = useState<'status' | 'logs' | 'reports' | 'pto' | 'personnel'>('status');
+  const [activeTab, setActiveTab] = useState<'status' | 'logs' | 'reports' | 'pto' | 'personnel' | 'settings'>('status');
   const [logs, setLogs] = useState<TimeLog[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [ptoRequests, setPtoRequests] = useState<PTORequest[]>([]);
@@ -670,15 +670,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [editingLog, setEditingLog] = useState<TimeLog | null>(null);
   const [expandedShiftId, setExpandedShiftId] = useState<string | null>(null);
+  const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   useEffect(() => {
     const unsubLogs = firebaseService.subscribeToLogs(setLogs);
     const unsubEmployees = firebaseService.subscribeToEmployees(setEmployees);
     const unsubPTO = firebaseService.subscribeToPTORequests(setPtoRequests);
+    const unsubSettings = firebaseService.subscribeToSettings((s) => {
+      setRequirePhotoVerification(s.requirePhotoVerification);
+    });
     return () => {
       unsubLogs();
       unsubEmployees();
       unsubPTO();
+      unsubSettings();
     };
   }, []);
 
@@ -719,6 +725,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     } catch (err) {
       console.error('Denial failed:', err);
       alert('Failed to deny request. Please check your connection and try again.');
+    }
+  };
+
+  const handleTogglePhotoVerification = async (checked: boolean) => {
+    setIsSavingSettings(true);
+    try {
+      await firebaseService.updateSettings(checked);
+    } catch (err) {
+      console.error('Failed to update config settings:', err);
+      alert('Failed to save settings. Please try again.');
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -1121,6 +1139,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
               { id: 'logs', label: 'Shift Records', icon: History },
               { id: 'pto', label: 'Time Off', icon: Calendar },
               { id: 'personnel', label: 'Personnel', icon: UserPlus },
+              { id: 'settings', label: 'Settings', icon: Settings },
             ].map(tab => (
               <button
                 key={`sidebar-tab-${tab.id}`}
@@ -1615,6 +1634,53 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="max-w-4xl mx-auto">
+              <div className="mb-12">
+                <h1 className="text-3xl font-black text-zrg-navy uppercase tracking-tighter">System Settings</h1>
+                <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-1">Configure Kiosk and operational parameters</p>
+              </div>
+
+              <div className="bg-white rounded-[2rem] border border-zrg-lightblue overflow-hidden shadow-2xl shadow-zrg-lightblue/10 p-8 md:p-12 space-y-10">
+                <div>
+                  <h2 className="text-xl font-black text-zrg-navy uppercase tracking-tight mb-2">Kiosk Verification</h2>
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">Customize how employees register clock events</p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 p-6 rounded-2xl bg-slate-50 border border-slate-100">
+                  <div className="space-y-1">
+                    <div className="font-bold text-zrg-navy text-sm">Photo & Camera Verification</div>
+                    <p className="text-xs text-slate-500 max-w-xl text-left">
+                      When enabled, employees must capture or upload a verification picture before completing punch actions. Disable this if employees are clocking in from a secure office space or dedicated terminal where cameras are unnecessary.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleTogglePhotoVerification(!requirePhotoVerification)}
+                    disabled={isSavingSettings}
+                    className={cn(
+                      "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-zrg-blue focus:ring-offset-2",
+                      requirePhotoVerification ? "bg-zrg-blue" : "bg-slate-200"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                        requirePhotoVerification ? "translate-x-5" : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {isSavingSettings && (
+                  <div className="flex items-center gap-2 text-zrg-blue text-xs font-bold uppercase tracking-wider animate-pulse">
+                    <div className="w-2 h-2 rounded-full bg-zrg-blue" />
+                    Updating System Configuration...
+                  </div>
+                )}
               </div>
             </div>
           )}

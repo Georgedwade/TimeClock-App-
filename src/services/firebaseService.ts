@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, where, Timestamp, orderBy, doc, updateDoc, onSnapshot, increment, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, query, where, Timestamp, orderBy, doc, updateDoc, onSnapshot, increment, deleteDoc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { LogType, Employee, TimeLog, PTORequest } from '../types';
@@ -249,6 +249,43 @@ export const firebaseService = {
       callback(requests);
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'pto_requests');
+    });
+  },
+
+  getSettings: async (): Promise<{ requirePhotoVerification: boolean }> => {
+    try {
+      const docRef = doc(db, 'settings', 'config');
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        return { requirePhotoVerification: data.requirePhotoVerification !== false };
+      }
+      return { requirePhotoVerification: true };
+    } catch (error) {
+      return { requirePhotoVerification: true };
+    }
+  },
+
+  updateSettings: async (requirePhotoVerification: boolean) => {
+    try {
+      const docRef = doc(db, 'settings', 'config');
+      return await setDoc(docRef, { requirePhotoVerification });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'settings/config');
+    }
+  },
+
+  subscribeToSettings: (callback: (settings: { requirePhotoVerification: boolean }) => void) => {
+    const docRef = doc(db, 'settings', 'config');
+    return onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        callback({ requirePhotoVerification: data.requirePhotoVerification !== false });
+      } else {
+        callback({ requirePhotoVerification: true });
+      }
+    }, (error) => {
+      callback({ requirePhotoVerification: true });
     });
   }
 };
