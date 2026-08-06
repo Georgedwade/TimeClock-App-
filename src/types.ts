@@ -29,10 +29,12 @@ export interface PTORequest {
   id?: string;
   employeeId: string;
   employeeName: string;
+  employeeEmail?: string;
   startDate: string;
   endDate: string;
   hoursRequested: number;
   status: 'pending' | 'approved' | 'rejected';
   note?: string;
   managerNote?: string;
+  createdAt?: string;
 }

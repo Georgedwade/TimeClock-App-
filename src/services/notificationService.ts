@@ -1,39 +1,117 @@
 import { Employee, PTORequest } from '../types';
 
+export interface EmailDispatchResult {
+  success: boolean;
+  recipient: string;
+  subject: string;
+  body: string;
+  mailtoUrl: string;
+}
+
 class NotificationService {
   /**
-   * Simulates sending an email by logging to the console and potentially showing a toast in the UI.
-   * In a production app, this would call a backend API (like Resend, SendGrid, or Firebase Functions).
+   * Primary email dispatch handler.
+   * Sends HTTP request if an email API key or webhook is available,
+   * logs to console, and constructs a clean mailto URL for direct dispatch.
    */
-  async sendEmail(to: string, subject: string, body: string) {
-    console.log('--- SENT EMAIL ---');
+  async sendEmail(to: string, subject: string, body: string): Promise<EmailDispatchResult> {
+    console.log('✉️ DISPATCHING EMAIL:');
     console.log(`To: ${to}`);
     console.log(`Subject: ${subject}`);
     console.log(`Body: ${body}`);
-    console.log('------------------');
-  }
 
-  async notifyManagersOfPTORequest(request: PTORequest, managers: Employee[]) {
-    for (const manager of managers) {
-      if (manager.email) {
-        await this.sendEmail(
-          manager.email,
-          `New PTO Request: ${request.employeeName}`,
-          `Employee ${request.employeeName} has requested PTO from ${request.startDate} to ${request.endDate} (${request.hoursRequested} hours).\n\nPlease log in to the ZRG Dashboard to approve or deny this request.`
-        );
+    const mailtoUrl = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+    // Attempt HTTP email dispatch via webhook/API if available in environment
+    try {
+      const webhookUrl = (import.meta as any).env?.VITE_EMAIL_WEBHOOK_URL;
+      if (webhookUrl) {
+        await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to, subject, body, app: 'ZRG Time Clock' })
+        });
       }
+    } catch (err) {
+      console.warn('HTTP Email Webhook dispatch skipped or failed:', err);
     }
+
+    return {
+      success: true,
+      recipient: to,
+      subject,
+      body,
+      mailtoUrl
+    };
   }
 
-  async notifyEmployeeOfPTOStatus(request: PTORequest, employee: Employee) {
-    if (!employee.email) return;
+  /**
+   * Notifies manager Dylan (dylan@zrgmedical.com) when a new PTO request is entered into the app.
+   */
+  async notifyManagersOfPTORequest(request: PTORequest, additionalManagers: Employee[] = []): Promise<EmailDispatchResult[]> {
+    const results: EmailDispatchResult[] = [];
+    const managerEmails = new Set<string>();
 
-    const status = request.status.toUpperCase();
-    const subject = `PTO Request ${status}: ${request.startDate} to ${request.endDate}`;
-    const body = `Hi ${employee.name},\n\nYour PTO request for ${request.hoursRequested} hours (from ${request.startDate} to ${request.endDate}) has been ${request.status}.\n\n${request.managerNote ? `Manager Note: ${request.managerNote}` : ''}\n\nThank you,\nZRG Management`;
+    // Always include Dylan
+    managerEmails.add('dylan@zrgmedical.com');
 
-    await this.sendEmail(employee.email, subject, body);
+    // Also include any other configured managers with emails
+    additionalManagers.forEach(m => {
+      if (m.role === 'manager' && m.email) {
+        managerEmails.add(m.email.toLowerCase().trim());
+      }
+    });
+
+    const subject = `New PTO Request Submitted: ${request.employeeName} (${request.hoursRequested} Hours)`;
+    const body = `Hello Dylan,
+
+A new Time Off (PTO) request has been submitted in the ZRG Medical Time Clock app:
+
+• Employee Name: ${request.employeeName}
+• Start Date: ${request.startDate}
+• End Date: ${request.endDate}
+• Total Hours: ${request.hoursRequested} Hours
+• Employee Note: ${request.note ? `"${request.note}"` : 'None provided'}
+• Status: Pending Approval
+
+Please log in to the ZRG Admin Dashboard to approve or deny this request.
+
+--
+ZRG Medical Time Clock System`;
+
+    for (const email of managerEmails) {
+      const res = await this.sendEmail(email, subject, body);
+      results.push(res);
+    }
+
+    return results;
+  }
+
+  /**
+   * Notifies employee when their PTO request is approved or denied.
+   */
+  async notifyEmployeeOfPTOStatus(request: PTORequest, employee: Partial<Employee>): Promise<EmailDispatchResult> {
+    const toEmail = employee.email || request.employeeEmail || 'dylan@zrgmedical.com';
+    const statusUpper = (request.status || 'updated').toUpperCase();
+
+    const subject = `ZRG Time Off Request ${statusUpper}: ${request.startDate} to ${request.endDate}`;
+    const body = `Hello ${employee.name || request.employeeName},
+
+Your Time Off (PTO) request has been ${statusUpper} by management:
+
+• Dates: ${request.startDate} to ${request.endDate}
+• Total Hours: ${request.hoursRequested} Hours
+• Decision Note: ${request.managerNote ? `"${request.managerNote}"` : 'N/A'}
+• Decision Date: ${new Date().toLocaleDateString()}
+
+If you have any questions regarding this decision, please speak with your supervisor.
+
+Best regards,
+ZRG Medical Management`;
+
+    return await this.sendEmail(toEmail, subject, body);
   }
 }
 
 export const notificationService = new NotificationService();
+

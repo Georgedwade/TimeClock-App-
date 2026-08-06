@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { firebaseService } from '../services/firebaseService';
+import { supabaseService, safeLocalStorage } from '../services/supabaseService';
 import { notificationService } from '../services/notificationService';
 import { TimeLog, Employee, LogType, PTORequest } from '../types';
 import { 
@@ -21,7 +21,9 @@ import {
   Trash2,
   X,
   FileText,
-  Plus
+  Plus,
+  CheckCircle,
+  XCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RegisterEmployeeModal } from './RegisterEmployeeModal';
@@ -673,11 +675,170 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
+  // PTO Filter & Search State
+  const [ptoSearchQuery, setPtoSearchQuery] = useState('');
+  const [ptoEmployeeFilter, setPtoEmployeeFilter] = useState('ALL');
+  const [ptoStatusFilter, setPtoStatusFilter] = useState('ALL');
+  const [ptoViewMode, setPtoViewMode] = useState<'table' | 'cards'>('table');
+  const [toastNotification, setToastNotification] = useState<{
+    message: string;
+    mailtoUrl?: string;
+    recipient?: string;
+  } | null>(null);
+
+  // PTO Decision Modal State
+  const [ptoDecisionTarget, setPtoDecisionTarget] = useState<{ request: PTORequest; action: 'approve' | 'deny' } | null>(null);
+  const [ptoDecisionNote, setPtoDecisionNote] = useState('');
+  const [ptoEmployeeEmail, setPtoEmployeeEmail] = useState('');
+  const [isSubmittingDecision, setIsSubmittingDecision] = useState(false);
+
+  const [hasLocalData, setHasLocalData] = useState(false);
+  const [localDataCounts, setLocalDataCounts] = useState({ employees: 0, logs: 0, ptoRequests: 0 });
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationResult, setMigrationResult] = useState<{ employees: number; logs: number; ptoRequests: number } | null>(null);
+
   useEffect(() => {
-    const unsubLogs = firebaseService.subscribeToLogs(setLogs);
-    const unsubEmployees = firebaseService.subscribeToEmployees(setEmployees);
-    const unsubPTO = firebaseService.subscribeToPTORequests(setPtoRequests);
-    const unsubSettings = firebaseService.subscribeToSettings((s) => {
+    try {
+      const rawEmps = safeLocalStorage.getItem('zrg_employees');
+      const rawLogs = safeLocalStorage.getItem('zrg_logs');
+      const rawPto = safeLocalStorage.getItem('zrg_pto_requests');
+
+      const safeParseArray = (str: string | null) => {
+        if (!str) return [];
+        try {
+          const parsed = JSON.parse(str);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      };
+
+      const emps = safeParseArray(rawEmps);
+      const lgs = safeParseArray(rawLogs);
+      const pto = safeParseArray(rawPto);
+
+      if (lgs.length > 0 || pto.length > 1 || emps.length > 8) {
+        setHasLocalData(true);
+        setLocalDataCounts({
+          employees: emps.length,
+          logs: lgs.length,
+          ptoRequests: pto.length
+        });
+      }
+    } catch (e) {
+      console.error('Error checking local storage data:', e);
+    }
+  }, []);
+
+  const handleExportDataFile = () => {
+    try {
+      const rawEmps = safeLocalStorage.getItem('zrg_employees');
+      const rawLogs = safeLocalStorage.getItem('zrg_logs');
+      const rawPto = safeLocalStorage.getItem('zrg_pto_requests');
+      const rawSettings = safeLocalStorage.getItem('zrg_settings');
+
+      const safeParseArray = (str: string | null) => {
+        if (!str) return [];
+        try {
+          const parsed = JSON.parse(str);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      };
+
+      const backup = {
+        employees: safeParseArray(rawEmps),
+        logs: safeParseArray(rawLogs),
+        pto_requests: safeParseArray(rawPto),
+        settings: rawSettings ? JSON.parse(rawSettings) : null,
+        exportedAt: new Date().toISOString()
+      };
+
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `zrg_timecard_backup_${new Date().toISOString().split('T')[0]}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    } catch (e) {
+      alert('Failed to export backup file: ' + e);
+    }
+  };
+
+  const handleImportDataFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const backup = JSON.parse(event.target?.result as string);
+        if (!backup || (!backup.employees && !backup.logs && !backup.pto_requests)) {
+          alert('Invalid backup file structure.');
+          return;
+        }
+
+        setIsMigrating(true);
+        const res = await supabaseService.importBackupData(backup);
+        if (res.success) {
+          alert(`Success! Imported:\n- ${res.count.employees} employees\n- ${res.count.logs} time logs\n- ${res.count.pto_requests} PTO requests`);
+          e.target.value = '';
+        }
+      } catch (err: any) {
+        alert('Failed to import backup file: ' + (err.message || err));
+      } finally {
+        setIsMigrating(false);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleMigrateLocalDataToSupabase = async () => {
+    setIsMigrating(true);
+    setMigrationResult(null);
+    try {
+      const rawEmps = safeLocalStorage.getItem('zrg_employees');
+      const rawLogs = safeLocalStorage.getItem('zrg_logs');
+      const rawPto = safeLocalStorage.getItem('zrg_pto_requests');
+      const rawSettings = safeLocalStorage.getItem('zrg_settings');
+
+      const safeParseArray = (str: string | null) => {
+        if (!str) return [];
+        try {
+          const parsed = JSON.parse(str);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      };
+
+      const backup = {
+        employees: safeParseArray(rawEmps),
+        logs: safeParseArray(rawLogs),
+        pto_requests: safeParseArray(rawPto),
+        settings: rawSettings ? JSON.parse(rawSettings) : null
+      };
+
+      const res = await supabaseService.importBackupData(backup);
+      if (res.success) {
+        setMigrationResult(res.count);
+        setHasLocalData(false);
+        alert(`Successfully migrated browser-local data to Firebase Cloud Database!\n\nImport statistics:\n- ${res.count.employees} Employees added\n- ${res.count.logs} Time Logs / Punches added\n- ${res.count.pto_requests} PTO Requests added`);
+      }
+    } catch (err: any) {
+      alert('Migration failed: ' + (err.message || err));
+    } finally {
+      setIsMigrating(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubLogs = supabaseService.subscribeToLogs(setLogs);
+    const unsubEmployees = supabaseService.subscribeToEmployees(setEmployees);
+    const unsubPTO = supabaseService.subscribeToPTORequests(setPtoRequests);
+    const unsubSettings = supabaseService.subscribeToSettings((s) => {
       setRequirePhotoVerification(s.requirePhotoVerification);
     });
     return () => {
@@ -689,49 +850,80 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   }, []);
 
 
-  const handleApprovePTO = async (request: PTORequest) => {
-    if (!request.id) return;
-    const note = prompt('Manager Note (Optional):', 'Approved');
-    const finalNote = note === null ? 'Approved' : note;
-
-    try {
-      // 1. Update request status with note
-      await firebaseService.updatePTORequestStatus(request.id, 'approved', finalNote);
-      // 2. Subtract from employee balance
-      await firebaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
-      // 3. Notify employee
-      const employee = employees.find(emp => emp.id === request.employeeId);
-      if (employee) {
-        await notificationService.notifyEmployeeOfPTOStatus({ ...request, status: 'approved', managerNote: finalNote }, employee);
-      }
-    } catch (err) {
-      console.error('Approval failed:', err);
-      alert('Failed to approve request. Please check your connection and try again.');
-    }
+  const openApproveModal = (request: PTORequest) => {
+    const emp = employees.find(e => e.id === request.employeeId);
+    const defaultEmail = emp?.email || request.employeeEmail || (request.employeeName ? `${request.employeeName.toLowerCase().replace(/\s+/g, '.')}@zrgmedical.com` : 'dylan@zrgmedical.com');
+    setPtoDecisionTarget({ request, action: 'approve' });
+    setPtoDecisionNote('Approved');
+    setPtoEmployeeEmail(defaultEmail);
   };
 
-  const handleDenyPTO = async (request: PTORequest) => {
-    if (!request.id) return;
-    const note = prompt('Reason for denial (Optional):', 'Request denied by management');
-    const finalNote = note === null ? 'Request denied' : (note || 'Request denied');
+  const openDenyModal = (request: PTORequest) => {
+    const emp = employees.find(e => e.id === request.employeeId);
+    const defaultEmail = emp?.email || request.employeeEmail || (request.employeeName ? `${request.employeeName.toLowerCase().replace(/\s+/g, '.')}@zrgmedical.com` : 'dylan@zrgmedical.com');
+    setPtoDecisionTarget({ request, action: 'deny' });
+    setPtoDecisionNote('Request denied by management');
+    setPtoEmployeeEmail(defaultEmail);
+  };
+
+  const confirmPTODecision = async () => {
+    if (!ptoDecisionTarget || !ptoDecisionTarget.request.id) return;
+    const { request, action } = ptoDecisionTarget;
+    setIsSubmittingDecision(true);
 
     try {
-      await firebaseService.updatePTORequestStatus(request.id, 'rejected', finalNote);
-      // Notify employee
-      const employee = employees.find(emp => emp.id === request.employeeId);
-      if (employee) {
-        await notificationService.notifyEmployeeOfPTOStatus({ ...request, status: 'rejected', managerNote: finalNote }, employee);
+      const isApprove = action === 'approve';
+      const finalStatus = isApprove ? 'approved' : 'rejected';
+      const finalNote = ptoDecisionNote.trim() || (isApprove ? 'Approved' : 'Request denied');
+
+      // 1. Update status in database
+      await supabaseService.updatePTORequestStatus(request.id, finalStatus, finalNote);
+
+      // 2. Subtract from employee balance if approved
+      if (isApprove) {
+        await supabaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
       }
+
+      // 3. Update employee email if provided & employee exists
+      let employee = employees.find(emp => emp.id === request.employeeId);
+      if (employee && ptoEmployeeEmail && employee.email !== ptoEmployeeEmail) {
+        employee = { ...employee, email: ptoEmployeeEmail };
+        await supabaseService.updateEmployee(employee.id, { email: ptoEmployeeEmail });
+      }
+
+      // 4. Send email notification
+      const updatedReq = { ...request, status: finalStatus as any, managerNote: finalNote };
+      const dispatchResult = await notificationService.notifyEmployeeOfPTOStatus(
+        updatedReq, 
+        employee || {
+          id: request.employeeId,
+          name: request.employeeName,
+          email: ptoEmployeeEmail || request.employeeEmail || 'dylan@zrgmedical.com',
+          pin: '',
+          role: 'staff'
+        }
+      );
+
+      // 5. Toast feedback
+      setToastNotification({
+        message: `PTO Request ${isApprove ? 'Approved' : 'Denied'}! Email dispatched to ${dispatchResult.recipient}.`,
+        mailtoUrl: dispatchResult.mailtoUrl,
+        recipient: dispatchResult.recipient
+      });
+
+      setPtoDecisionTarget(null);
     } catch (err) {
-      console.error('Denial failed:', err);
-      alert('Failed to deny request. Please check your connection and try again.');
+      console.error('PTO decision error:', err);
+      alert('Failed to process PTO request update. Please try again.');
+    } finally {
+      setIsSubmittingDecision(false);
     }
   };
 
   const handleTogglePhotoVerification = async (checked: boolean) => {
     setIsSavingSettings(true);
     try {
-      await firebaseService.updateSettings(checked);
+      await supabaseService.updateSettings(checked);
     } catch (err) {
       console.error('Failed to update config settings:', err);
       alert('Failed to save settings. Please try again.');
@@ -751,7 +943,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     }
 
     try {
-      await firebaseService.updateEmployeePTO(employeeId, amount);
+      await supabaseService.updateEmployeePTO(employeeId, amount);
     } catch (err) {
       console.error('Update failed:', err);
       alert('Failed to update PTO balance');
@@ -762,7 +954,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     const newRole = currentRole === 'manager' ? 'staff' : 'manager';
     // Removed window.confirm for reliability in iframe
     try {
-      await firebaseService.updateEmployeeRole(employeeId, newRole);
+      await supabaseService.updateEmployeeRole(employeeId, newRole);
     } catch (err) {
       console.error('Role update failed:', err);
       alert('Failed to update role');
@@ -772,7 +964,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const handleSaveEmployee = async (data: Partial<Employee>) => {
     if (!editingEmployee?.id) return;
     try {
-      await firebaseService.updateEmployee(editingEmployee.id, data);
+      await supabaseService.updateEmployee(editingEmployee.id, data);
       setEditingEmployee(null);
     } catch (err) {
       console.error('Save failed:', err);
@@ -787,7 +979,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     }
 
     try {
-      await firebaseService.addEmployee(employeeData);
+      await supabaseService.addEmployee(employeeData);
       setIsRegisterModalOpen(false);
     } catch (err) {
       console.error('Registration failed:', err);
@@ -804,7 +996,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     
     console.log('Finalizing deletion for employee ID:', id);
     try {
-      await firebaseService.deleteEmployee(id);
+      await supabaseService.deleteEmployee(id);
       console.log('Successfully deleted employee record:', id);
       setEditingEmployee(null);
       setConfirmingDeleteId(null);
@@ -816,7 +1008,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleSaveLog = async (id: string, data: Partial<TimeLog>) => {
     try {
-      await firebaseService.updateLog(id, data);
+      await supabaseService.updateLog(id, data);
       setEditingLog(null);
     } catch (err) {
       console.error('Save log failed:', err);
@@ -826,7 +1018,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleDeleteLog = async (id: string) => {
     try {
-      await firebaseService.deleteLog(id);
+      await supabaseService.deleteLog(id);
       setEditingLog(null);
     } catch (err) {
       console.error('Delete log failed:', err);
@@ -836,7 +1028,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleDeletePTO = async (id: string) => {
     try {
-      await firebaseService.deletePTORequest(id);
+      await supabaseService.deletePTORequest(id);
       setConfirmingDeleteId(null);
     } catch (err) {
       console.error('Delete PTO failed:', err);
@@ -846,14 +1038,57 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleAddManualPTO = async (request: Omit<PTORequest, 'id'>) => {
     try {
-      await firebaseService.addPTORequest(request);
+      await supabaseService.addPTORequest(request);
       if (request.status === 'approved') {
         // If it's already approved, subtract hours immediately
-        await firebaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
+        await supabaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
       }
+
+      // 1. Always notify dylan@zrgmedical.com
+      const managerResults = await notificationService.notifyManagersOfPTORequest(
+        request, 
+        employees.filter(e => e.role === 'manager')
+      );
+
+      // 2. If employee exists and request is approved or rejected, notify employee
+      const employee = employees.find(e => e.id === request.employeeId);
+      if (employee && (request.status === 'approved' || request.status === 'rejected')) {
+        await notificationService.notifyEmployeeOfPTOStatus(request, employee);
+      }
+
+      setToastNotification({
+        message: `PTO Record created. Notification email sent to dylan@zrgmedical.com.`,
+        mailtoUrl: managerResults[0]?.mailtoUrl,
+        recipient: 'dylan@zrgmedical.com'
+      });
     } catch (err) {
       console.error('Manual PTO entry failed:', err);
       alert('Failed to record PTO entry');
+    }
+  };
+
+  const handleSendEmailNotice = async (request: PTORequest) => {
+    const employee = employees.find(e => e.id === request.employeeId);
+    if (request.status === 'pending') {
+      const res = await notificationService.notifyManagersOfPTORequest(request, employees.filter(e => e.role === 'manager'));
+      setToastNotification({
+        message: `Notification email dispatched to dylan@zrgmedical.com for ${request.employeeName}'s PTO request.`,
+        mailtoUrl: res[0]?.mailtoUrl,
+        recipient: 'dylan@zrgmedical.com'
+      });
+    } else {
+      const res = await notificationService.notifyEmployeeOfPTOStatus(request, employee || {
+        id: request.employeeId,
+        name: request.employeeName,
+        email: request.employeeEmail || 'dylan@zrgmedical.com',
+        pin: '',
+        role: 'staff'
+      });
+      setToastNotification({
+        message: `Status notification email sent to ${res.recipient} for ${request.employeeName}.`,
+        mailtoUrl: res.mailtoUrl,
+        recipient: res.recipient
+      });
     }
   };
 
@@ -862,12 +1097,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       if (oldLogIds && oldLogIds.length > 0) {
         // Use a single loop to delete all old logs
         for (const id of oldLogIds) {
-          await firebaseService.deleteLog(id);
+          await supabaseService.deleteLog(id);
         }
       }
       
       for (const log of logsToSubmit) {
-        await firebaseService.addLog(log);
+        await supabaseService.addLog(log);
       }
       setEditingShift(null);
     } catch (err) {
@@ -1109,6 +1344,47 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     );
   }, [summarizedShifts, searchQuery]);
 
+  const filteredPTORequests = useMemo(() => {
+    return ptoRequests.filter(req => {
+      // Filter by Employee
+      if (ptoEmployeeFilter !== 'ALL' && req.employeeId !== ptoEmployeeFilter) {
+        return false;
+      }
+      // Filter by Status
+      if (ptoStatusFilter !== 'ALL' && req.status !== ptoStatusFilter) {
+        return false;
+      }
+      // Search query
+      if (ptoSearchQuery.trim() !== '') {
+        const q = ptoSearchQuery.toLowerCase().trim();
+        const nameMatch = req.employeeName?.toLowerCase().includes(q);
+        const noteMatch = req.note?.toLowerCase().includes(q);
+        const managerNoteMatch = req.managerNote?.toLowerCase().includes(q);
+        const dateMatch = req.startDate.includes(q) || req.endDate.includes(q);
+        const statusMatch = req.status.toLowerCase().includes(q);
+        if (!nameMatch && !noteMatch && !managerNoteMatch && !dateMatch && !statusMatch) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [ptoRequests, ptoEmployeeFilter, ptoStatusFilter, ptoSearchQuery]);
+
+  const ptoMetrics = useMemo(() => {
+    const total = ptoRequests.length;
+    const pending = ptoRequests.filter(r => r.status === 'pending').length;
+    const approved = ptoRequests.filter(r => r.status === 'approved');
+    const approvedHours = approved.reduce((sum, r) => sum + (r.hoursRequested || 0), 0);
+    const rejected = ptoRequests.filter(r => r.status === 'rejected').length;
+    return {
+      total,
+      pending,
+      approvedCount: approved.length,
+      approvedHours,
+      rejected
+    };
+  }, [ptoRequests]);
+
   return (
     <div className="flex flex-col flex-1 h-screen bg-zrg-lightblue/30 overflow-hidden font-sans">
       <div className="flex flex-1 overflow-hidden">
@@ -1160,10 +1436,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           <div className="mt-auto space-y-4">
             <div className="bg-white/5 rounded-2xl p-5 border border-white/5">
                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">Sync Status</p>
-               <div className="flex items-center gap-2 text-[10px] font-bold uppercase">
-                 <div className="w-2 h-2 rounded-full bg-zrg-green" />
-                 Database Connected
-               </div>
+               {supabaseService.isLive() ? (
+                 <div className="flex items-center gap-2 text-[10px] font-bold uppercase text-emerald-400">
+                   <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                   Firebase Connected
+                 </div>
+               ) : (
+                 <div className="space-y-2 mt-1">
+                   <div className="flex items-center gap-2 text-[10px] font-bold uppercase text-amber-500">
+                     <span className="relative flex h-2.5 w-2.5">
+                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                       <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                     </span>
+                     Tablet-Local Mode
+                   </div>
+                   <p className="text-[9px] text-slate-400 font-medium leading-relaxed normal-case">
+                     Firebase cloud limit exceeded. Punches and updates are fully stored offline on this tablet and will sync automatically once limits reset.
+                   </p>
+                   <button 
+                     onClick={() => {
+                       supabaseService.forceRetryFirebase();
+                       window.location.reload();
+                     }}
+                     className="text-[9px] hover:underline font-bold text-zrg-blue uppercase tracking-wider block pt-1 cursor-pointer"
+                   >
+                     Retry Cloud Sync
+                   </button>
+                 </div>
+               )}
             </div>
             <button 
               onClick={handleExport}
@@ -1424,113 +1724,403 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           )}
 
           {activeTab === 'pto' && (
-            <div className="max-w-6xl mx-auto">
-              <div className="flex justify-between items-end mb-12">
+            <div className="max-w-6xl mx-auto space-y-6">
+              {/* Header */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-2">
                 <div>
-                  <h1 className="text-3xl font-black text-slate-900 uppercase tracking-tighter">Time Off Requests</h1>
-                  <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-1">Pending and approved leave</p>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-zrg-blue rounded-xl flex items-center justify-center text-white shadow-lg shadow-zrg-blue/20">
+                      <Calendar size={20} />
+                    </div>
+                    <div>
+                      <h1 className="text-3xl font-black text-zrg-navy uppercase tracking-tighter">Time Off Records</h1>
+                      <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-0.5">Filter leave requests by employee and dispatch email updates</p>
+                    </div>
+                  </div>
                 </div>
-                <button 
-                  onClick={() => setIsManualPTOModalOpen(true)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-blue-100 transition-all"
-                >
-                  New Record
-                </button>
+                <div className="flex items-center gap-3">
+                  <div className="flex bg-slate-200/60 p-1 rounded-xl">
+                    <button 
+                      onClick={() => setPtoViewMode('table')}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all",
+                        ptoViewMode === 'table' ? "bg-white text-zrg-navy shadow-sm" : "text-slate-500 hover:text-zrg-navy"
+                      )}
+                    >
+                      Table View
+                    </button>
+                    <button 
+                      onClick={() => setPtoViewMode('cards')}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all",
+                        ptoViewMode === 'cards' ? "bg-white text-zrg-navy shadow-sm" : "text-slate-500 hover:text-zrg-navy"
+                      )}
+                    >
+                      Cards
+                    </button>
+                  </div>
+                  <button 
+                    onClick={() => setIsManualPTOModalOpen(true)}
+                    className="bg-zrg-blue hover:bg-opacity-90 text-white px-6 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-zrg-blue/20 flex items-center gap-2 transition-all"
+                  >
+                    <Plus size={16} />
+                    New Record
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {ptoRequests.map((req, index) => (
-                  <div key={`pto-${req.id || index}`} className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-blue-50/50 -rotate-45 translate-x-12 -translate-y-12" />
-                    
-                    <div className="flex items-center gap-5 mb-8">
-                      <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center text-slate-400 group-hover:text-blue-600 transition-colors border border-slate-100">
-                        <Calendar size={24} />
+              {/* Summary Metric Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Records</p>
+                    <p className="text-2xl font-black text-zrg-navy mt-1 tabular-nums">{ptoMetrics.total}</p>
+                  </div>
+                  <div className="w-11 h-11 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400 border border-slate-100">
+                    <Calendar size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-amber-200/80 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                      Pending Approval
+                    </p>
+                    <p className="text-2xl font-black text-amber-600 mt-1 tabular-nums">{ptoMetrics.pending}</p>
+                  </div>
+                  <div className="w-11 h-11 bg-amber-50 rounded-xl flex items-center justify-center text-amber-600 border border-amber-100">
+                    <Clock size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-zrg-blue/20 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black text-zrg-blue uppercase tracking-widest">Approved Hours</p>
+                    <p className="text-2xl font-black text-zrg-blue mt-1 tabular-nums">
+                      {ptoMetrics.approvedHours.toFixed(1)} <span className="text-xs font-bold text-slate-400">HRS</span>
+                    </p>
+                  </div>
+                  <div className="w-11 h-11 bg-zrg-lightblue/50 rounded-xl flex items-center justify-center text-zrg-blue border border-zrg-blue/10">
+                    <FileText size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-emerald-200/80 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Approved Requests</p>
+                    <p className="text-2xl font-black text-emerald-600 mt-1 tabular-nums">{ptoMetrics.approvedCount}</p>
+                  </div>
+                  <div className="w-11 h-11 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-600 border border-emerald-100">
+                    <Users size={20} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter & Search Bar */}
+              <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[280px]">
+                  {/* Search */}
+                  <div className="relative flex-1 min-w-[220px]">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                    <input 
+                      type="text" 
+                      placeholder="SEARCH NAME, REASON, DATES..."
+                      value={ptoSearchQuery}
+                      onChange={(e) => setPtoSearchQuery(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-11 pr-8 py-3 text-[11px] font-bold uppercase tracking-widest focus:border-zrg-blue outline-none transition-all"
+                    />
+                    {ptoSearchQuery && (
+                      <button onClick={() => setPtoSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Filter by Employee Dropdown */}
+                  <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5">
+                    <Users size={16} className="text-zrg-blue shrink-0" />
+                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider hidden sm:inline">Employee:</span>
+                    <select
+                      value={ptoEmployeeFilter}
+                      onChange={(e) => setPtoEmployeeFilter(e.target.value)}
+                      className="bg-transparent text-[11px] font-bold uppercase tracking-widest text-zrg-navy outline-none cursor-pointer pr-2"
+                    >
+                      <option value="ALL">ALL PERSONNEL ({employees.length})</option>
+                      {employees.map(emp => (
+                        <option key={`pto-emp-opt-${emp.id}`} value={emp.id}>
+                          {emp.name.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Filter by Status Dropdown */}
+                  <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5">
+                    <Filter size={16} className="text-zrg-blue shrink-0" />
+                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider hidden sm:inline">Status:</span>
+                    <select
+                      value={ptoStatusFilter}
+                      onChange={(e) => setPtoStatusFilter(e.target.value)}
+                      className="bg-transparent text-[11px] font-bold uppercase tracking-widest text-zrg-navy outline-none cursor-pointer pr-2"
+                    >
+                      <option value="ALL">ALL STATUSES</option>
+                      <option value="pending">PENDING ONLY</option>
+                      <option value="approved">APPROVED ONLY</option>
+                      <option value="rejected">DENIED ONLY</option>
+                    </select>
+                  </div>
+                </div>
+
+                {(ptoEmployeeFilter !== 'ALL' || ptoStatusFilter !== 'ALL' || ptoSearchQuery !== '') && (
+                  <button
+                    onClick={() => {
+                      setPtoEmployeeFilter('ALL');
+                      setPtoStatusFilter('ALL');
+                      setPtoSearchQuery('');
+                    }}
+                    className="text-[10px] font-black uppercase tracking-widest text-zrg-orange hover:bg-zrg-orange/10 px-3 py-2 rounded-xl border border-zrg-orange/20 transition-all flex items-center gap-1.5"
+                  >
+                    <X size={12} />
+                    Reset Filters
+                  </button>
+                )}
+              </div>
+
+              {/* Table or Cards Display */}
+              {ptoViewMode === 'table' ? (
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-slate-50/70 border-b border-slate-100">
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Leave Dates</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Duration</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Status</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredPTORequests.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-8 py-12 text-center text-slate-400">
+                            <Calendar className="mx-auto mb-3 opacity-30 text-slate-400" size={32} />
+                            <p className="font-bold text-sm uppercase tracking-wider text-slate-600">No Time Off Records Found</p>
+                            <p className="text-[10px] text-slate-400 mt-1 uppercase">Try adjusting your employee filter or search query</p>
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredPTORequests.map((req, index) => {
+                          const emp = employees.find(e => e.id === req.employeeId);
+                          return (
+                            <tr key={`pto-tbl-${req.id || index}`} className="hover:bg-slate-50/80 transition-colors group">
+                              <td className="px-6 py-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-9 h-9 rounded-xl bg-zrg-blue/10 text-zrg-blue font-black flex items-center justify-center text-xs uppercase border border-zrg-blue/20 shrink-0">
+                                    {req.employeeName ? req.employeeName.substring(0, 2) : 'EM'}
+                                  </div>
+                                  <div>
+                                    <div className="font-bold text-zrg-navy text-sm">{req.employeeName}</div>
+                                    <div className="text-[10px] text-slate-400 font-medium">
+                                      {emp?.email || req.employeeEmail || 'dylan@zrgmedical.com'}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+
+                              <td className="px-6 py-4">
+                                <div className="text-slate-700 font-bold text-xs flex items-center gap-1.5">
+                                  <span>{req.startDate}</span>
+                                  <ChevronRight size={12} className="text-slate-300" />
+                                  <span>{req.endDate}</span>
+                                </div>
+                                {req.note && (
+                                  <div className="text-[10px] text-slate-400 italic mt-0.5 max-w-xs truncate" title={req.note}>
+                                    Note: "{req.note}"
+                                  </div>
+                                )}
+                                {req.managerNote && (
+                                  <div className="text-[10px] text-zrg-blue font-medium italic mt-0.5 max-w-xs truncate" title={req.managerNote}>
+                                    Manager: "{req.managerNote}"
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-6 py-4">
+                                <div className="text-zrg-blue font-black text-sm tabular-nums">
+                                  {req.hoursRequested} <span className="text-[9px] text-slate-400 font-bold">HRS</span>
+                                </div>
+                              </td>
+
+                              <td className="px-6 py-4 text-center">
+                                <span className={cn(
+                                  "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border",
+                                  req.status === 'pending' ? "bg-amber-50 text-amber-600 border-amber-200" :
+                                  req.status === 'approved' ? "bg-emerald-50 text-emerald-600 border-emerald-200" :
+                                  "bg-rose-50 text-rose-600 border-rose-200"
+                                )}>
+                                  {req.status}
+                                </span>
+                              </td>
+
+                              <td className="px-6 py-4 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  {req.status === 'pending' && (
+                                    <>
+                                      <button 
+                                        onClick={() => openApproveModal(req)}
+                                        className="px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors border border-emerald-200"
+                                      >
+                                        Approve
+                                      </button>
+                                      <button 
+                                        onClick={() => openDenyModal(req)}
+                                        className="px-3 py-1.5 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors border border-rose-200"
+                                      >
+                                        Deny
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {/* Resend Email Notice Button */}
+                                  <button
+                                    onClick={() => handleSendEmailNotice(req)}
+                                    title="Resend email notice"
+                                    className="px-2.5 py-1.5 bg-slate-50 text-slate-500 hover:bg-zrg-blue hover:text-white rounded-lg transition-colors border border-slate-200 text-[9px] font-black uppercase tracking-wider flex items-center gap-1"
+                                  >
+                                    <span>📧</span> Email
+                                  </button>
+
+                                  {/* Delete Record Button */}
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (confirmingDeleteId === req.id) {
+                                        handleDeletePTO(req.id!);
+                                      } else {
+                                        setConfirmingDeleteId(req.id!);
+                                        setTimeout(() => setConfirmingDeleteId(null), 3000);
+                                      }
+                                    }}
+                                    className={cn(
+                                      "p-2 rounded-lg transition-all border",
+                                      confirmingDeleteId === req.id 
+                                        ? "bg-zrg-orange text-white border-zrg-orange animate-pulse" 
+                                        : "bg-slate-50 text-slate-300 hover:bg-zrg-orange hover:text-white border-slate-200"
+                                    )}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                /* Card Grid View */
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {filteredPTORequests.map((req, index) => (
+                    <div key={`pto-card-${req.id || index}`} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group">
+                      <div className="flex items-center gap-4 mb-6">
+                        <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400 group-hover:text-zrg-blue transition-colors border border-slate-100">
+                          <Calendar size={20} />
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-lg font-bold text-slate-800">{req.employeeName}</h3>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className={cn(
+                              "text-[10px] font-black uppercase tracking-widest",
+                              req.status === 'pending' ? "text-amber-600" :
+                              req.status === 'approved' ? "text-zrg-green" : "text-zrg-orange"
+                            )}>
+                              {req.status}
+                            </span>
+                            <span className="text-[10px] text-slate-300">•</span>
+                            <span className="text-[10px] text-zrg-blue font-black uppercase tracking-widest">{req.hoursRequested} Hours</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex-1">
-                        <h3 className="text-xl font-bold text-slate-800">{req.employeeName}</h3>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className={cn(
-                            "text-[10px] font-black uppercase tracking-widest",
-                            req.status === 'pending' ? "text-amber-600" :
-                            req.status === 'approved' ? "text-zrg-green" : "text-zrg-orange"
-                          )}>
-                            {req.status}
-                          </span>
-                          <span className="text-[10px] text-slate-300">•</span>
-                          <span className="text-[10px] text-zrg-blue font-black uppercase tracking-widest">{req.hoursRequested} Hours</span>
+
+                      <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl mb-6 border border-slate-100">
+                        <div className="text-center">
+                          <p className="text-[9px] text-slate-400 uppercase font-black mb-1">Start Date</p>
+                          <p className="font-bold text-slate-700 text-sm">{req.startDate}</p>
+                        </div>
+                        <ChevronRight className="text-slate-300" size={16} />
+                        <div className="text-center">
+                          <p className="text-[9px] text-slate-400 uppercase font-black mb-1">End Date</p>
+                          <p className="font-bold text-slate-700 text-sm">{req.endDate}</p>
+                        </div>
+                      </div>
+
+                      {req.note && (
+                        <div className="p-3 bg-slate-100/50 rounded-xl mb-4 text-[11px] text-slate-500 italic border border-slate-100">
+                          <p className="text-[9px] text-slate-400 uppercase font-black not-italic mb-0.5">Employee Note:</p>
+                          "{req.note}"
+                        </div>
+                      )}
+
+                      {req.managerNote && (
+                        <div className="p-3 bg-blue-50/50 rounded-xl mb-6 text-[11px] text-blue-600 italic border border-blue-100">
+                          <p className="text-[9px] text-blue-400 uppercase font-black not-italic mb-0.5">Manager Decision Note:</p>
+                          "{req.managerNote}"
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-3 pt-4 border-t border-slate-100">
+                        <button
+                          onClick={() => handleSendEmailNotice(req)}
+                          className="px-3 py-2 bg-slate-50 text-slate-600 hover:bg-zrg-blue hover:text-white rounded-xl text-[9px] font-black uppercase tracking-wider transition-all border border-slate-200 flex items-center gap-1.5"
+                        >
+                          <span>📧</span> Resend Email
+                        </button>
+
+                        <div className="flex items-center gap-2">
+                          {req.status === 'pending' && (
+                            <>
+                              <button 
+                                onClick={() => openApproveModal(req)}
+                                className="px-4 py-2 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-xl font-black uppercase text-[9px] tracking-widest transition-colors border border-emerald-200"
+                              >
+                                Approve
+                              </button>
+                              <button 
+                                onClick={() => openDenyModal(req)}
+                                className="px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-xl font-black uppercase text-[9px] tracking-widest transition-colors border border-rose-200"
+                              >
+                                Deny
+                              </button>
+                            </>
+                          )}
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirmingDeleteId === req.id) {
+                                handleDeletePTO(req.id!);
+                              } else {
+                                setConfirmingDeleteId(req.id!);
+                                setTimeout(() => setConfirmingDeleteId(null), 3000);
+                              }
+                            }}
+                            className={cn(
+                              "p-2 rounded-xl transition-all border",
+                              confirmingDeleteId === req.id 
+                                ? "bg-zrg-orange text-white border-zrg-orange animate-pulse" 
+                                : "text-slate-300 hover:text-zrg-orange hover:bg-zrg-orange/5 border-slate-100"
+                            )}
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </div>
                     </div>
-
-                    <div className="flex items-center justify-between p-5 bg-slate-50 rounded-xl mb-8 border border-slate-100">
-                      <div className="text-center">
-                        <p className="text-[9px] text-slate-400 uppercase font-black mb-1">Start Date</p>
-                        <p className="font-bold text-slate-700 text-sm">{req.startDate}</p>
-                      </div>
-                      <ChevronRight className="text-slate-300" size={16} />
-                      <div className="text-center">
-                        <p className="text-[9px] text-slate-400 uppercase font-black mb-1">End Date</p>
-                        <p className="font-bold text-slate-700 text-sm">{req.endDate}</p>
-                      </div>
-                    </div>
-
-                    {req.note && (
-                      <div className="p-4 bg-slate-100/50 rounded-xl mb-4 text-[11px] text-slate-500 italic border border-slate-100">
-                        <p className="text-[9px] text-slate-400 uppercase font-black not-italic mb-1">Employee Note:</p>
-                        "{req.note}"
-                      </div>
-                    )}
-
-                    {req.managerNote && (
-                      <div className="p-4 bg-blue-50/50 rounded-xl mb-8 text-[11px] text-blue-600 italic border border-blue-100">
-                        <p className="text-[9px] text-blue-400 uppercase font-black not-italic mb-1">Manager Decision Note:</p>
-                        "{req.managerNote}"
-                      </div>
-                    )}
-
-                    {req.status === 'pending' && (
-                      <div className="flex gap-4">
-                        <button 
-                          onClick={() => handleApprovePTO(req)}
-                          className="flex-1 bg-emerald-50 text-emerald-600 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-emerald-100 transition-colors"
-                        >
-                          Approve
-                        </button>
-                        <button 
-                          onClick={() => handleDenyPTO(req)}
-                          className="flex-1 bg-rose-50 text-rose-600 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-rose-100 transition-colors"
-                        >
-                          Deny
-                        </button>
-                      </div>
-                    )}
-
-                    <div className="mt-6 pt-6 border-t border-slate-50 flex justify-end">
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (confirmingDeleteId === req.id) {
-                            handleDeletePTO(req.id!);
-                          } else {
-                            setConfirmingDeleteId(req.id!);
-                            setTimeout(() => setConfirmingDeleteId(null), 3000);
-                          }
-                        }}
-                        className={cn(
-                          "flex items-center gap-2 px-4 py-2 rounded-xl font-black uppercase text-[9px] tracking-widest transition-all",
-                          confirmingDeleteId === req.id 
-                            ? "bg-zrg-orange text-white animate-pulse shadow-lg shadow-zrg-orange/20" 
-                            : "text-slate-300 hover:text-zrg-orange hover:bg-zrg-orange/5"
-                        )}
-                      >
-                        <Trash2 size={12} />
-                        {confirmingDeleteId === req.id ? "Confirm Deletion?" : "Delete Record"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1682,6 +2272,79 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                   </div>
                 )}
               </div>
+
+              {/* Data Portability & Migration Section */}
+              <div className="bg-white rounded-[2rem] border border-zrg-lightblue overflow-hidden shadow-2xl shadow-zrg-lightblue/10 p-8 md:p-12 mt-8 space-y-10">
+                <div>
+                  <h2 className="text-xl font-black text-zrg-navy uppercase tracking-tight mb-2">Data Portability & Migration</h2>
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">Migrate time logs or restore backups across browsers and links</p>
+                </div>
+
+                <div className="space-y-6">
+                  {/* Option 1: Browser-local storage detected */}
+                  {hasLocalData && (
+                    <div className="p-6 rounded-2xl bg-amber-50 border border-amber-200 mt-2 space-y-4">
+                      <div className="flex gap-3 items-start">
+                        <AlertTriangle className="text-amber-500 shrink-0 mt-0.5" size={20} />
+                        <div>
+                          <div className="font-extrabold text-amber-900 text-sm">Offline Browser-Local Data Recovered</div>
+                          <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                            We detected {localDataCounts.logs} punches and {localDataCounts.employees} employees stored securely in this tablet's local cache.
+                            You can migrate them directly to your active Firebase Cloud Database now to merge your offline and online records.
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleMigrateLocalDataToSupabase}
+                        disabled={isMigrating}
+                        className="bg-amber-600 hover:bg-amber-700 text-white font-extrabold uppercase text-[10px] tracking-widest px-5 py-3 rounded-xl transition-all disabled:opacity-50"
+                      >
+                        {isMigrating ? "Syncing..." : "Migrate Local Punches to Live Firebase Cloud"}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Option 2: File Import/Export (For cross-device or cross-url transfer) */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="p-6 rounded-2xl bg-slate-50 border border-slate-100 flex flex-col justify-between space-y-4">
+                      <div className="space-y-1">
+                        <div className="font-bold text-zrg-navy text-sm">Export Migration File</div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                          Downloads a lightweight file containing all database tables stored in your browser's local cache. Perfect for backing up your work or migrating data from one link (e.g. your Development URL) to another.
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleExportDataFile}
+                        className="w-full bg-slate-800 hover:bg-slate-950 text-white font-extrabold uppercase text-[10px] tracking-widest py-3 rounded-xl transition-all"
+                      >
+                        Download Backup (.json)
+                      </button>
+                    </div>
+
+                    <div className="p-6 rounded-2xl bg-slate-50 border border-slate-100 flex flex-col justify-between space-y-4">
+                      <div className="space-y-1">
+                        <div className="font-bold text-zrg-navy text-sm">Import Migration File</div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                          Restores or imports your previously downloaded backup file directly into your active database. This writes all matching personnel and punch records safely while protecting existing items from duplication.
+                        </p>
+                      </div>
+                      <label className="w-full">
+                        <span className="w-full inline-block text-center bg-zrg-blue hover:bg-zrg-navy text-white font-extrabold uppercase text-[10px] tracking-widest py-3.5 rounded-xl transition-all cursor-pointer">
+                          {isMigrating ? "Importing..." : "Choose File to Upload"}
+                        </span>
+                        <input
+                          type="file"
+                          accept=".json"
+                          onChange={handleImportDataFile}
+                          disabled={isMigrating}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </main>
@@ -1739,6 +2402,145 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           />
         )}
 
+        {ptoDecisionTarget && (
+          <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-slate-100"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "w-10 h-10 rounded-2xl flex items-center justify-center text-white shadow-lg",
+                    ptoDecisionTarget.action === 'approve' ? "bg-emerald-500 shadow-emerald-500/20" : "bg-rose-500 shadow-rose-500/20"
+                  )}>
+                    {ptoDecisionTarget.action === 'approve' ? <CheckCircle size={20} /> : <XCircle size={20} />}
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-zrg-navy uppercase tracking-tight">
+                      {ptoDecisionTarget.action === 'approve' ? 'Approve PTO Request' : 'Deny PTO Request'}
+                    </h3>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+                      Confirm status & notify employee
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setPtoDecisionTarget(null)}
+                  className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Summary Box */}
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 mb-6 space-y-2">
+                <div className="flex justify-between items-center text-xs font-bold text-slate-700">
+                  <span className="text-slate-400 uppercase tracking-wider text-[10px]">Employee:</span>
+                  <span className="font-black text-zrg-navy">{ptoDecisionTarget.request.employeeName}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs font-bold text-slate-700">
+                  <span className="text-slate-400 uppercase tracking-wider text-[10px]">Dates:</span>
+                  <span>{ptoDecisionTarget.request.startDate} to {ptoDecisionTarget.request.endDate}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs font-bold text-slate-700">
+                  <span className="text-slate-400 uppercase tracking-wider text-[10px]">Requested Hours:</span>
+                  <span className="font-black text-zrg-blue">{ptoDecisionTarget.request.hoursRequested} Hours</span>
+                </div>
+              </div>
+
+              {/* Employee Email Input */}
+              <div className="mb-4">
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
+                  Employee Email Address (For Notification)
+                </label>
+                <input 
+                  type="email"
+                  value={ptoEmployeeEmail}
+                  onChange={(e) => setPtoEmployeeEmail(e.target.value)}
+                  placeholder="employee@zrgmedical.com"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold text-zrg-navy focus:border-zrg-blue outline-none"
+                />
+              </div>
+
+              {/* Manager Decision Note */}
+              <div className="mb-6">
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
+                  Manager Decision Note / Reason
+                </label>
+                <textarea 
+                  rows={3}
+                  value={ptoDecisionNote}
+                  onChange={(e) => setPtoDecisionNote(e.target.value)}
+                  placeholder="Add an optional note for the employee..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-medium text-slate-700 focus:border-zrg-blue outline-none resize-none"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-3">
+                <button 
+                  onClick={() => setPtoDecisionTarget(null)}
+                  className="px-5 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest text-slate-500 hover:bg-slate-100 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={confirmPTODecision}
+                  disabled={isSubmittingDecision}
+                  className={cn(
+                    "px-6 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest text-white shadow-xl transition-all flex items-center gap-2",
+                    ptoDecisionTarget.action === 'approve' 
+                      ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20" 
+                      : "bg-rose-600 hover:bg-rose-700 shadow-rose-600/20",
+                    isSubmittingDecision && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  {isSubmittingDecision ? (
+                    <span>Processing...</span>
+                  ) : (
+                    <>
+                      <span>📧</span>
+                      <span>Confirm & Notify Employee</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {toastNotification && (
+          <motion.div 
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            className="fixed bottom-6 right-6 z-[100] max-w-md bg-zrg-navy text-white p-5 rounded-2xl shadow-2xl border border-white/10 flex flex-col gap-3"
+          >
+            <div className="flex justify-between items-start">
+              <div className="flex items-center gap-2 text-zrg-teal font-black text-xs uppercase tracking-wider">
+                <span>📧 Notification Dispatched</span>
+              </div>
+              <button onClick={() => setToastNotification(null)} className="text-slate-400 hover:text-white p-1">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-300 font-medium leading-relaxed">{toastNotification.message}</p>
+            {toastNotification.mailtoUrl && (
+              <a 
+                href={toastNotification.mailtoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setToastNotification(null)}
+                className="inline-flex items-center justify-center gap-2 bg-zrg-blue text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-opacity-90 transition-all shadow-md mt-1"
+              >
+                <span>📬</span> Open Direct Mail Client
+              </a>
+            )}
+          </motion.div>
+        )}
       </AnimatePresence>
     </div>
   );

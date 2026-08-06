@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { PinPad } from './PinPad';
 import { CameraModal } from './CameraModal';
 import { PTORequestModal } from './PTORequestModal';
-import { firebaseService } from '../services/firebaseService';
+import { supabaseService } from '../services/supabaseService';
 import { Employee, LogType, TimeLog } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { Clock, Coffee, LogOut, CheckCircle2, AlertCircle, ShieldEllipsis, Building2, Calendar } from 'lucide-react';
@@ -77,9 +77,9 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
 
   useEffect(() => {
     loadEmployees();
-    const unsubLogs = firebaseService.subscribeToLogs(setLogs);
-    const unsubEmps = firebaseService.subscribeToEmployees(setEmployees);
-    const unsubSettings = firebaseService.subscribeToSettings((s) => {
+    const unsubLogs = supabaseService.subscribeToLogs(setLogs);
+    const unsubEmps = supabaseService.subscribeToEmployees(setEmployees);
+    const unsubSettings = supabaseService.subscribeToSettings((s) => {
       setRequirePhotoVerification(s.requirePhotoVerification);
     });
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -92,7 +92,7 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
   }, []);
 
   const loadEmployees = async () => {
-    const list = await firebaseService.getEmployees();
+    const list = await supabaseService.getEmployees();
     setEmployees(list);
   };
 
@@ -114,7 +114,7 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
       if (!selectedEmployee) return;
       setIsLoading(true);
       try {
-        await firebaseService.addLog({
+        await supabaseService.addLog({
           employeeId: selectedEmployee.id,
           employeeName: selectedEmployee.name,
           type: action as LogType,
@@ -160,7 +160,7 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
     setShowCamera(false);
     
     try {
-      await firebaseService.addLog({
+      await supabaseService.addLog({
         employeeId: selectedEmployee.id,
         employeeName: selectedEmployee.name,
         type: selectedAction as LogType,

@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { KioskView } from './components/KioskView';
 import { DashboardView } from './components/DashboardView';
-import { firebaseService } from './services/firebaseService';
+import { supabaseService } from './services/supabaseService';
 import { Employee } from './types';
-import { db } from './services/firebaseService';
-import { collection, addDoc, getDocs } from 'firebase/firestore';
 import { AnimatePresence, motion } from 'motion/react';
 import { ShieldCheck, X, Building2 } from 'lucide-react';
 import { PinPad } from './components/PinPad';
@@ -16,64 +14,30 @@ export default function App() {
   const [employees, setEmployees] = useState<Employee[]>([]);
 
   useEffect(() => {
-    seedDataIfEmpty();
-    const unsubscribe = firebaseService.subscribeToEmployees(setEmployees);
-    return () => unsubscribe();
-  }, []);
-
-  const seedDataIfEmpty = async () => {
-    try {
-      const snapshot = await getDocs(collection(db, 'employees'));
-      const existingNames = snapshot.docs.map(doc => doc.data().name);
-
-      if (!snapshot.empty && existingNames.length > 5) {
-        setIsInitializing(false);
-        return;
-      }
-      
-      const initialEmployees = [
-        { name: 'Alma Carreno', email: 'alma.carreno@zrg.com', pin: '093695', role: 'staff', title: 'eCommerce Representative', ptoBalance: 105.12 },
-        { name: 'Doug Schneider', email: 'doug.schneider@zrg.com', pin: '949620', role: 'staff', title: 'Biomedical Equipment Technician', ptoBalance: 27.90 },
-        { name: 'George Wade', email: 'George.Dylan.Wade@gmail.com', pin: '587475', role: 'manager', title: 'General Manager', ptoBalance: 24.28 },
-        { name: 'Jennifer Milam', email: 'jennifer.milam@zrg.com', pin: '114082', role: 'staff', title: 'Logistics Coordinator', ptoBalance: 75.03 },
-        { name: 'Jesus Yanez', email: 'jesus.yanez@zrg.com', pin: '037325', role: 'staff', title: 'Warehouse', ptoBalance: 32.13 },
-        { name: 'Jorge Lopez', email: 'jorge.lopez@zrg.com', pin: '588384', role: 'staff', title: 'Warehouse', ptoBalance: 28.48 },
-        { name: 'Kyle Johnson', email: 'kyle.johnson@zrg.com', pin: '764763', role: 'staff', title: 'CBET Inventory Specialist', ptoBalance: 76.69 },
-        { name: 'Selena Macias', email: 'selena.macias@zrg.com', pin: '022663', role: 'staff', title: 'Biomedical Equipment Technician', ptoBalance: 26.63 },
-      ];
-
-      // Only add employees who aren't already in the system by name
-      let addedCount = 0;
-      for (const emp of initialEmployees) {
-        if (!existingNames.includes(emp.name)) {
-          await addDoc(collection(db, 'employees'), emp);
-          addedCount++;
+    let active = true;
+    const initApp = async () => {
+      try {
+        // Run seedDataIfEmpty but don't let it block booting indefinitely if it hangs
+        const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1200));
+        await Promise.race([
+          supabaseService.seedDataIfEmpty(),
+          timeoutPromise
+        ]);
+      } catch (err) {
+        console.warn('Booting initialization caught error (falling back to cached storage):', err);
+      } finally {
+        if (active) {
+          setIsInitializing(false);
         }
       }
-
-      if (addedCount > 0) {
-        console.log(`Successfully seeded ${addedCount} ZRG employee records.`);
-      }
-      
-      // Seed a sample PTO request if needed
-      const ptoSnapshot = await getDocs(collection(db, 'pto_requests'));
-      if (ptoSnapshot.empty) {
-        await addDoc(collection(db, 'pto_requests'), {
-          employeeId: 'temp_id',
-          employeeName: 'Alma Carreno',
-          startDate: '2026-06-01',
-          endDate: '2026-06-05',
-          hoursRequested: 40,
-          status: 'pending',
-          note: 'Planned time off'
-        });
-      }
-    } catch (err) {
-      console.error('Failed to seed data:', err);
-    } finally {
-      setIsInitializing(false);
-    }
-  };
+    };
+    initApp();
+    const unsubscribe = supabaseService.subscribeToEmployees(setEmployees);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   const handleManagerPinComplete = (pin: string) => {
     const manager = employees.find(emp => emp.pin === pin && emp.role === 'manager');

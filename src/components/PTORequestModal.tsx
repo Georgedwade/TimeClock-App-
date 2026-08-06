@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Calendar, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { Employee } from '../types';
-import { firebaseService } from '../services/firebaseService';
+import { supabaseService } from '../services/supabaseService';
 import { notificationService } from '../services/notificationService';
 import { cn } from '../lib/utils';
 
@@ -47,6 +47,7 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
       const requestData = {
         employeeId: employee.id,
         employeeName: employee.name,
+        employeeEmail: employee.email,
         startDate,
         endDate,
         hoursRequested: hours,
@@ -54,10 +55,10 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
         note
       };
       
-      await firebaseService.addPTORequest(requestData);
+      await supabaseService.addPTORequest(requestData);
       
       // Notify managers
-      const allEmployees = await firebaseService.getEmployees();
+      const allEmployees = await supabaseService.getEmployees();
       const managers = allEmployees.filter(emp => emp.role === 'manager');
       await notificationService.notifyManagersOfPTORequest(requestData, managers);
 
