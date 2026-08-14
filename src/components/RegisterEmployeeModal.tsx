@@ -40,15 +40,12 @@ export const RegisterEmployeeModal: React.FC<RegisterEmployeeModalProps> = ({ is
     try {
       const registrationData: Omit<Employee, 'id'> = {
         name: formData.name.trim(),
-        pin: formData.pin,
+        email: formData.email.trim() || '',
+        pin: formData.pin.trim(),
         role: formData.role,
-        title: formData.title.trim() || undefined,
-        ptoBalance: formData.ptoBalance || 0
+        title: formData.title.trim() || '',
+        ptoBalance: Number(formData.ptoBalance) || 0
       };
-
-      if (formData.email && formData.email.trim() !== '') {
-        registrationData.email = formData.email.trim();
-      }
 
       await onRegister(registrationData);
       onClose();
@@ -62,13 +59,13 @@ export const RegisterEmployeeModal: React.FC<RegisterEmployeeModalProps> = ({ is
       });
     } catch (err: any) {
       console.error(err);
-      let errMsg = 'Failed to register. ';
+      let errMsg = 'Failed to register employee. ';
       if (err instanceof Error) {
         try {
           const parsed = JSON.parse(err.message);
-          errMsg += parsed.error || err.message;
+          errMsg = parsed.error || err.message;
         } catch {
-          errMsg += err.message;
+          errMsg = err.message;
         }
       } else {
         errMsg += String(err);

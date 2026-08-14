@@ -182,7 +182,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     operationType,
     path
   };
-  console.warn('Firestore Operation Blocked/Failed Code:', JSON.stringify(errInfo));
+  console.warn('Firestore Operation Code:', JSON.stringify(errInfo));
   return errInfo;
 }
 
@@ -221,7 +221,14 @@ export const supabaseService = {
       }
 
       for (const emp of initialEmployees) {
-        await addDoc(collection(db, 'employees'), emp);
+        await addDoc(collection(db, 'employees'), {
+          name: emp.name,
+          email: emp.email || '',
+          pin: emp.pin,
+          role: emp.role || 'staff',
+          title: emp.title || '',
+          ptoBalance: Number(emp.ptoBalance) || 0
+        });
       }
 
       // Seed configuration settings
@@ -234,7 +241,7 @@ export const supabaseService = {
 
   // Employees Functions
   getEmployees: async (): Promise<Employee[]> => {
-    if (!isFirebaseBlocked) {
+    if (!isFirebaseBlocked && db) {
       try {
         const q = query(collection(db, 'employees'));
         const querySnapshot = await getDocs(q);
@@ -266,34 +273,42 @@ export const supabaseService = {
 
   addEmployee: async (employee: Omit<Employee, 'id'>) => {
     const payload = {
-      name: employee.name,
-      email: employee.email,
-      pin: employee.pin,
-      role: employee.role,
-      title: employee.title,
-      ptoBalance: employee.ptoBalance || 0,
+      name: (employee.name || '').trim(),
+      email: (employee.email || '').trim(),
+      pin: (employee.pin || '').trim(),
+      role: (employee.role === 'manager' ? 'manager' : 'staff') as 'staff' | 'manager',
+      title: (employee.title || '').trim(),
+      ptoBalance: Number(employee.ptoBalance) || 0,
     };
 
-    if (!isFirebaseBlocked) {
+    if (!isFirebaseBlocked && db) {
       try {
         const docRef = await addDoc(collection(db, 'employees'), payload);
-        const newEmp = { id: docRef.id, ...payload };
+        const newEmp: Employee = { id: docRef.id, ...payload };
         
-        // Update local memory too
-        const emps = await supabaseService.getEmployees();
-        emps.push(newEmp);
+        // Update local memory & storage immediately
+        const raw = safeLocalStorage.getItem('zrg_employees');
+        const emps = raw ? parseEmployees(JSON.parse(raw)) : [];
+        const existingIdx = emps.findIndex(e => e.id === docRef.id || e.pin === payload.pin);
+        if (existingIdx >= 0) {
+          emps[existingIdx] = newEmp;
+        } else {
+          emps.push(newEmp);
+        }
         safeLocalStorage.setItem('zrg_employees', JSON.stringify(emps));
         triggerListeners('employees', emps);
         return newEmp;
       } catch (e) {
+        console.error('Failed to create employee in Firestore:', e);
         handleFirestoreError(e, OperationType.CREATE, 'employees');
+        throw e;
       }
     }
 
-    // Local Fallback
+    // Local Fallback (only when offline or Firebase blocked)
     const raw = safeLocalStorage.getItem('zrg_employees');
     const emps = raw ? parseEmployees(JSON.parse(raw)) : [];
-    const newEmp = { id: `local_${Date.now()}`, ...payload };
+    const newEmp: Employee = { id: `local_${Date.now()}`, ...payload };
     emps.push(newEmp);
     safeLocalStorage.setItem('zrg_employees', JSON.stringify(emps));
     triggerListeners('employees', emps);
@@ -301,26 +316,28 @@ export const supabaseService = {
   },
 
   updateEmployee: async (employeeId: string, data: Partial<Employee>) => {
-    if (!isFirebaseBlocked && !employeeId.startsWith('local_')) {
+    const payload: any = {};
+    if (data.name !== undefined) payload.name = (data.name || '').trim();
+    if (data.email !== undefined) payload.email = (data.email || '').trim();
+    if (data.pin !== undefined) payload.pin = (data.pin || '').trim();
+    if (data.role !== undefined) payload.role = data.role === 'manager' ? 'manager' : 'staff';
+    if (data.title !== undefined) payload.title = (data.title || '').trim();
+    if (data.ptoBalance !== undefined) payload.ptoBalance = Number(data.ptoBalance) || 0;
+
+    if (!isFirebaseBlocked && db && !employeeId.startsWith('local_') && !employeeId.startsWith('seed_')) {
       try {
         const docRef = doc(db, 'employees', employeeId);
-        const payload: any = {};
-        if (data.name !== undefined) payload.name = data.name;
-        if (data.email !== undefined) payload.email = data.email;
-        if (data.pin !== undefined) payload.pin = data.pin;
-        if (data.role !== undefined) payload.role = data.role;
-        if (data.title !== undefined) payload.title = data.title;
-        if (data.ptoBalance !== undefined) payload.ptoBalance = data.ptoBalance;
         await updateDoc(docRef, payload);
       } catch (e) {
         handleFirestoreError(e, OperationType.UPDATE, `employees/${employeeId}`);
+        throw e;
       }
     }
 
     // Local Fallback
     const raw = safeLocalStorage.getItem('zrg_employees');
     let emps = raw ? parseEmployees(JSON.parse(raw)) : [];
-    emps = emps.map(emp => emp.id === employeeId ? { ...emp, ...data } : emp);
+    emps = emps.map(emp => emp.id === employeeId ? { ...emp, ...payload } : emp);
     safeLocalStorage.setItem('zrg_employees', JSON.stringify(emps));
     triggerListeners('employees', emps);
   },
@@ -330,7 +347,7 @@ export const supabaseService = {
   },
 
   updateEmployeePTO: async (employeeId: string, hours: number) => {
-    if (!isFirebaseBlocked && !employeeId.startsWith('local_')) {
+    if (!isFirebaseBlocked && db && !employeeId.startsWith('local_') && !employeeId.startsWith('seed_')) {
       try {
         const docRef = doc(db, 'employees', employeeId);
         const docSnap = await getDoc(docRef);
@@ -342,6 +359,7 @@ export const supabaseService = {
         }
       } catch (e) {
         handleFirestoreError(e, OperationType.UPDATE, `employees/${employeeId}`);
+        throw e;
       }
     }
 
@@ -360,11 +378,12 @@ export const supabaseService = {
   },
 
   deleteEmployee: async (employeeId: string) => {
-    if (!isFirebaseBlocked && !employeeId.startsWith('local_')) {
+    if (!isFirebaseBlocked && db && !employeeId.startsWith('local_') && !employeeId.startsWith('seed_')) {
       try {
         await deleteDoc(doc(db, 'employees', employeeId));
       } catch (e) {
         handleFirestoreError(e, OperationType.DELETE, `employees/${employeeId}`);
+        throw e;
       }
     }
 
@@ -424,26 +443,32 @@ export const supabaseService = {
   // Time Logs / Shift Record Functions
   addLog: async (log: Omit<TimeLog, 'id'>) => {
     const payload = {
-      employeeId: log.employeeId,
-      employeeName: log.employeeName,
+      employeeId: (log.employeeId || '').trim(),
+      employeeName: (log.employeeName || '').trim(),
       type: log.type,
-      timestamp: Timestamp.fromDate(log.timestamp),
+      timestamp: Timestamp.fromDate(log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp)),
       photoUrl: log.photoUrl || '',
       note: log.note || '',
     };
 
-    if (!isFirebaseBlocked && !log.employeeId.startsWith('local_')) {
+    if (!isFirebaseBlocked && db && !log.employeeId.startsWith('local_') && !log.employeeId.startsWith('seed_')) {
       try {
         const docRef = await addDoc(collection(db, 'logs'), payload);
         const newLog = { id: docRef.id, ...log };
         
         const logs = await supabaseService.getLogs();
-        logs.unshift(newLog);
+        const existingIdx = logs.findIndex(l => l.id === docRef.id);
+        if (existingIdx >= 0) {
+          logs[existingIdx] = newLog;
+        } else {
+          logs.unshift(newLog);
+        }
         safeLocalStorage.setItem('zrg_logs', JSON.stringify(logs));
         triggerListeners('logs', logs);
         return newLog;
       } catch (e) {
         handleFirestoreError(e, OperationType.CREATE, 'logs');
+        throw e;
       }
     }
 
@@ -638,28 +663,35 @@ export const supabaseService = {
 
   addPTORequest: async (request: Omit<PTORequest, 'id'>) => {
     const payload = {
-      employeeId: request.employeeId,
-      employeeName: request.employeeName,
-      startDate: request.startDate,
-      endDate: request.endDate,
+      employeeId: (request.employeeId || '').trim(),
+      employeeName: (request.employeeName || '').trim(),
+      employeeEmail: (request.employeeEmail || '').trim(),
+      startDate: (request.startDate || '').trim(),
+      endDate: (request.endDate || '').trim(),
       hoursRequested: Number(request.hoursRequested || 0),
-      status: request.status || 'pending',
+      status: (request.status || 'pending') as 'pending' | 'approved' | 'rejected',
       note: request.note || '',
       managerNote: request.managerNote || '',
     };
 
-    if (!isFirebaseBlocked && !request.employeeId.startsWith('local_')) {
+    if (!isFirebaseBlocked && db && !request.employeeId.startsWith('local_') && !request.employeeId.startsWith('seed_')) {
       try {
         const docRef = await addDoc(collection(db, 'pto_requests'), payload);
         const newReq = { id: docRef.id, ...payload } as PTORequest;
         
         const reqs = await supabaseService.getPTORequests();
-        reqs.push(newReq);
+        const existingIdx = reqs.findIndex(r => r.id === docRef.id);
+        if (existingIdx >= 0) {
+          reqs[existingIdx] = newReq;
+        } else {
+          reqs.push(newReq);
+        }
         safeLocalStorage.setItem('zrg_pto_requests', JSON.stringify(reqs));
         triggerListeners('pto_requests', reqs);
         return newReq;
       } catch (e) {
         handleFirestoreError(e, OperationType.CREATE, 'pto_requests');
+        throw e;
       }
     }
 
