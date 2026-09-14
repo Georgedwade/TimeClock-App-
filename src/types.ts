@@ -23,6 +23,19 @@ export interface TimeLog {
   timestamp: Date;
   photoUrl: string;
   note?: string;
+  isHoliday?: boolean;
+  holidayName?: string;
+}
+
+export interface HolidayRecord {
+  id?: string;
+  employeeId: string;
+  employeeName: string;
+  date: string; // 'yyyy-MM-dd'
+  holidayName: string;
+  hours: number;
+  note?: string;
+  createdAt?: string;
 }
 
 export interface PTORequest {

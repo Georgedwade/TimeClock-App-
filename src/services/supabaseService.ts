@@ -1,4 +1,4 @@
-import { LogType, Employee, TimeLog, PTORequest } from '../types';
+import { LogType, Employee, TimeLog, PTORequest, HolidayRecord } from '../types';
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { 
@@ -45,18 +45,19 @@ const memoryCache: Record<string, string> = {};
 export const safeLocalStorage = {
   getItem: (key: string): string | null => {
     try {
-      return localStorage.getItem(key);
+      const item = localStorage.getItem(key);
+      if (item !== null) return item;
     } catch (e) {
       console.warn(`localStorage READ blocked for key "${key}". Falling back to in-memory state.`, e);
-      return memoryCache[key] || null;
     }
+    return memoryCache[key] || null;
   },
   setItem: (key: string, value: string): void => {
+    memoryCache[key] = value;
     try {
       localStorage.setItem(key, value);
     } catch (e) {
-      console.warn(`localStorage WRITE blocked for key "${key}". Falling back to in-memory state.`, e);
-      memoryCache[key] = value;
+      console.warn(`localStorage WRITE blocked or quota exceeded for key "${key}". Preserved in memory cache.`, e);
     }
   }
 };
@@ -68,6 +69,7 @@ const listeners: { [table: string]: Set<SubCallback> } = {
   logs: new Set(),
   pto_requests: new Set(),
   settings: new Set(),
+  holiday_records: new Set(),
 };
 
 function triggerListeners(table: string, data: any) {
@@ -115,8 +117,24 @@ function parseLogs(raw: any): TimeLog[] {
       timestamp: dateObj,
       photoUrl: l.photoUrl || '',
       note: l.note || '',
+      isHoliday: !!l.isHoliday,
+      holidayName: l.holidayName || '',
     };
   }).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+}
+
+function parseHolidayRecords(raw: any): HolidayRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(h => ({
+    id: h.id,
+    employeeId: h.employeeId || '',
+    employeeName: h.employeeName || '',
+    date: h.date || '',
+    holidayName: h.holidayName || 'Holiday',
+    hours: Number(h.hours || 0),
+    note: h.note || '',
+    createdAt: h.createdAt || (h.created_at ? (typeof h.created_at === 'object' && h.created_at.seconds ? new Date(h.created_at.seconds * 1000).toISOString() : String(h.created_at)) : undefined)
+  })).sort((a, b) => b.date.localeCompare(a.date));
 }
 
 function parsePTORequests(raw: any): PTORequest[] {
@@ -449,6 +467,8 @@ export const supabaseService = {
       timestamp: Timestamp.fromDate(log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp)),
       photoUrl: log.photoUrl || '',
       note: log.note || '',
+      ...(log.isHoliday !== undefined ? { isHoliday: log.isHoliday } : {}),
+      ...(log.holidayName ? { holidayName: log.holidayName } : {}),
     };
 
     if (!isFirebaseBlocked && db && !log.employeeId.startsWith('local_') && !log.employeeId.startsWith('seed_')) {
@@ -483,12 +503,22 @@ export const supabaseService = {
   },
 
   getLogs: async (startDate?: Date, endDate?: Date): Promise<TimeLog[]> => {
-    if (!isFirebaseBlocked) {
+    if (!isFirebaseBlocked && db) {
       try {
-        const q = query(collection(db, 'logs'), limit(2000));
+        let q;
+        if (startDate && endDate) {
+          q = query(
+            collection(db, 'logs'),
+            where('timestamp', '>=', Timestamp.fromDate(startDate)),
+            where('timestamp', '<=', Timestamp.fromDate(endDate)),
+            orderBy('timestamp', 'desc')
+          );
+        } else {
+          q = query(collection(db, 'logs'), orderBy('timestamp', 'desc'));
+        }
         const querySnapshot = await getDocs(q);
         const logs = querySnapshot.docs.map(doc => {
-          const data = doc.data();
+          const data = doc.data() as Record<string, any>;
           let dateObj = new Date();
           if (data.timestamp) {
             if (typeof data.timestamp.toDate === 'function') {
@@ -505,11 +535,18 @@ export const supabaseService = {
             timestamp: dateObj,
             photoUrl: data.photoUrl || '',
             note: data.note || '',
+            isHoliday: !!data.isHoliday,
+            holidayName: data.holidayName || '',
           };
         });
         
         logs.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-        safeLocalStorage.setItem('zrg_logs', JSON.stringify(logs));
+        try {
+          const light = logs.map(l => (l.photoUrl && l.photoUrl.length > 500 ? { ...l, photoUrl: '' } : l));
+          safeLocalStorage.setItem('zrg_logs', JSON.stringify(light));
+        } catch (e) {
+          console.warn('Could not cache logs to storage:', e);
+        }
         
         if (startDate && endDate) {
           return logs.filter(log => log.timestamp >= startDate && log.timestamp <= endDate);
@@ -539,6 +576,8 @@ export const supabaseService = {
         if (data.type !== undefined) payload.type = data.type;
         if (data.photoUrl !== undefined) payload.photoUrl = data.photoUrl;
         if (data.note !== undefined) payload.note = data.note;
+        if (data.isHoliday !== undefined) payload.isHoliday = data.isHoliday;
+        if (data.holidayName !== undefined) payload.holidayName = data.holidayName;
         if (data.timestamp !== undefined) {
           payload.timestamp = Timestamp.fromDate(data.timestamp);
         }
@@ -586,9 +625,9 @@ export const supabaseService = {
     }
 
     let unsub = () => {};
-    if (!isFirebaseBlocked) {
+    if (!isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(query(collection(db, 'logs'), orderBy('timestamp', 'desc'), limit(300)), (snapshot) => {
+        unsub = onSnapshot(query(collection(db, 'logs'), orderBy('timestamp', 'desc')), (snapshot) => {
           isFirebaseBlocked = false;
           const logs = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -608,10 +647,17 @@ export const supabaseService = {
               timestamp: dateObj,
               photoUrl: data.photoUrl || '',
               note: data.note || '',
+              isHoliday: !!data.isHoliday,
+              holidayName: data.holidayName || '',
             };
           }).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
           
-          safeLocalStorage.setItem('zrg_logs', JSON.stringify(logs));
+          try {
+            const light = logs.map(l => (l.photoUrl && l.photoUrl.length > 500 ? { ...l, photoUrl: '' } : l));
+            safeLocalStorage.setItem('zrg_logs', JSON.stringify(light));
+          } catch (e) {
+            console.warn('Could not cache logs to storage:', e);
+          }
           callback(logs);
         }, (error) => {
           handleFirestoreError(error, OperationType.GET, 'logs');
@@ -789,6 +835,166 @@ export const supabaseService = {
     };
   },
 
+  // Holiday Records Functions
+  getHolidayRecords: async (): Promise<HolidayRecord[]> => {
+    if (!isFirebaseBlocked && db) {
+      try {
+        const q = query(collection(db, 'holiday_records'), orderBy('date', 'desc'));
+        const querySnapshot = await getDocs(q);
+        const records = querySnapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            employeeId: data.employeeId || '',
+            employeeName: data.employeeName || '',
+            date: data.date || '',
+            holidayName: data.holidayName || 'Holiday',
+            hours: Number(data.hours || 0),
+            note: data.note || '',
+            createdAt: data.createdAt ? (typeof data.createdAt.toDate === 'function' ? data.createdAt.toDate().toISOString() : String(data.createdAt)) : undefined
+          } as HolidayRecord;
+        });
+
+        safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(records));
+        return records;
+      } catch (e) {
+        handleFirestoreError(e, OperationType.GET, 'holiday_records');
+      }
+    }
+
+    const raw = safeLocalStorage.getItem('zrg_holiday_records');
+    return raw ? parseHolidayRecords(JSON.parse(raw)) : [];
+  },
+
+  addHolidayRecord: async (record: Omit<HolidayRecord, 'id'>): Promise<HolidayRecord> => {
+    const payload = {
+      employeeId: (record.employeeId || '').trim(),
+      employeeName: (record.employeeName || '').trim(),
+      date: (record.date || '').trim(),
+      holidayName: (record.holidayName || 'Holiday').trim(),
+      hours: Number(record.hours || 0),
+      note: record.note || '',
+      createdAt: Timestamp.now()
+    };
+
+    if (!isFirebaseBlocked && db && !record.employeeId.startsWith('local_')) {
+      try {
+        const docRef = await addDoc(collection(db, 'holiday_records'), payload);
+        const newRecord: HolidayRecord = {
+          id: docRef.id,
+          employeeId: payload.employeeId,
+          employeeName: payload.employeeName,
+          date: payload.date,
+          holidayName: payload.holidayName,
+          hours: payload.hours,
+          note: payload.note,
+          createdAt: new Date().toISOString()
+        };
+
+        const existing = await supabaseService.getHolidayRecords();
+        const updated = [newRecord, ...existing.filter(r => r.id !== docRef.id)];
+        safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(updated));
+        triggerListeners('holiday_records', updated);
+        return newRecord;
+      } catch (e) {
+        handleFirestoreError(e, OperationType.CREATE, 'holiday_records');
+      }
+    }
+
+    // Local fallback
+    const raw = safeLocalStorage.getItem('zrg_holiday_records');
+    const records = raw ? parseHolidayRecords(JSON.parse(raw)) : [];
+    const newRecord: HolidayRecord = {
+      id: `local_hol_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      employeeId: payload.employeeId,
+      employeeName: payload.employeeName,
+      date: payload.date,
+      holidayName: payload.holidayName,
+      hours: payload.hours,
+      note: payload.note,
+      createdAt: new Date().toISOString()
+    };
+    records.unshift(newRecord);
+    safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(records));
+    triggerListeners('holiday_records', records);
+    return newRecord;
+  },
+
+  addBatchHolidayRecords: async (records: Omit<HolidayRecord, 'id'>[]): Promise<HolidayRecord[]> => {
+    const created: HolidayRecord[] = [];
+    for (const rec of records) {
+      try {
+        const res = await supabaseService.addHolidayRecord(rec);
+        created.push(res);
+      } catch (err) {
+        console.error('Error adding individual holiday record in batch:', rec, err);
+      }
+    }
+    return created;
+  },
+
+  deleteHolidayRecord: async (recordId: string): Promise<void> => {
+    if (!isFirebaseBlocked && db && !recordId.startsWith('local_')) {
+      try {
+        await deleteDoc(doc(db, 'holiday_records', recordId));
+      } catch (e) {
+        handleFirestoreError(e, OperationType.DELETE, `holiday_records/${recordId}`);
+      }
+    }
+
+    // Local fallback
+    const raw = safeLocalStorage.getItem('zrg_holiday_records');
+    let records = raw ? parseHolidayRecords(JSON.parse(raw)) : [];
+    records = records.filter(r => r.id !== recordId);
+    safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(records));
+    triggerListeners('holiday_records', records);
+  },
+
+  subscribeToHolidayRecords: (callback: (records: HolidayRecord[]) => void) => {
+    listeners.holiday_records.add(callback);
+
+    const raw = safeLocalStorage.getItem('zrg_holiday_records');
+    if (raw) {
+      callback(parseHolidayRecords(JSON.parse(raw)));
+    }
+
+    let unsub = () => {};
+    if (!isFirebaseBlocked && db) {
+      try {
+        unsub = onSnapshot(collection(db, 'holiday_records'), (snapshot) => {
+          isFirebaseBlocked = false;
+          const records = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+              id: doc.id,
+              employeeId: data.employeeId || '',
+              employeeName: data.employeeName || '',
+              date: data.date || '',
+              holidayName: data.holidayName || 'Holiday',
+              hours: Number(data.hours || 0),
+              note: data.note || '',
+              createdAt: data.createdAt ? (typeof data.createdAt.toDate === 'function' ? data.createdAt.toDate().toISOString() : String(data.createdAt)) : undefined
+            } as HolidayRecord;
+          }).sort((a, b) => b.date.localeCompare(a.date));
+
+          safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(records));
+          callback(records);
+        }, (error) => {
+          handleFirestoreError(error, OperationType.GET, 'holiday_records');
+          const localStr = safeLocalStorage.getItem('zrg_holiday_records');
+          if (localStr) callback(parseHolidayRecords(JSON.parse(localStr)));
+        });
+      } catch (e) {
+        console.warn('Holiday sub setup failed:', e);
+      }
+    }
+
+    return () => {
+      listeners.holiday_records.delete(callback);
+      unsub();
+    };
+  },
+
   // Settings Functions
   getSettings: async (): Promise<{ requirePhotoVerification: boolean }> => {
     if (!isFirebaseBlocked) {
@@ -886,6 +1092,7 @@ export const supabaseService = {
     employees?: any[];
     logs?: any[];
     pto_requests?: any[];
+    holiday_records?: any[];
     settings?: any;
   }) => {
     let empCount = 0;
@@ -1047,6 +1254,37 @@ export const supabaseService = {
         }
       }
 
+      // Import Holiday records
+      let holidayCount = 0;
+      if (backup.holiday_records && backup.holiday_records.length > 0) {
+        for (const hol of backup.holiday_records) {
+          try {
+            const oldId = hol.employeeId || hol.employee_id;
+            const empName = hol.employeeName || hol.employee_name;
+            const liveEmpId = oldId === 'ALL' ? 'ALL' : getLiveEmployeeId(oldId, empName);
+
+            if (!liveEmpId && oldId !== 'ALL') {
+              continue;
+            }
+
+            const payload = {
+              employeeId: liveEmpId || 'ALL',
+              employeeName: empName || '',
+              date: hol.date || '',
+              holidayName: hol.holidayName || 'Holiday',
+              hours: Number(hol.hours || 0),
+              note: hol.note || '',
+              createdAt: Timestamp.now()
+            };
+
+            await addDoc(collection(db, 'holiday_records'), payload);
+            holidayCount++;
+          } catch (e) {
+            console.error('Error importing holiday record to firebase:', hol, e);
+          }
+        }
+      }
+
       // Sync settings
       if (backup.settings) {
         const rpv = backup.settings.requirePhotoVerification !== undefined ? backup.settings.requirePhotoVerification : backup.settings.require_photo_verification;
@@ -1062,6 +1300,10 @@ export const supabaseService = {
     triggerListeners('employees', backup.employees || []);
     triggerListeners('logs', backup.logs || []);
     triggerListeners('pto_requests', backup.pto_requests || []);
+    if (backup.holiday_records) {
+      safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(backup.holiday_records));
+      triggerListeners('holiday_records', backup.holiday_records);
+    }
     if (backup.settings) {
       triggerListeners('settings', backup.settings);
     }

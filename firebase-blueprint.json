@@ -45,6 +45,20 @@
       },
       "required": ["employeeId", "employeeName", "startDate", "endDate", "hoursRequested", "status"]
     },
+    "holidayRecord": {
+      "title": "Holiday Record",
+      "description": "Company holiday hours credited to personnel",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "holidayName": { "type": "string" },
+        "hours": { "type": "number" },
+        "note": { "type": "string" }
+      },
+      "required": ["employeeId", "employeeName", "date", "holidayName", "hours"]
+    },
     "systemSettings": {
       "title": "System Settings",
       "description": "General system configs",
@@ -66,6 +80,10 @@
     "/pto_requests/{requestId}": {
       "schema": "ptoRequest",
       "description": "Time off requests"
+    },
+    "/holiday_records/{recordId}": {
+      "schema": "holidayRecord",
+      "description": "Designated holiday hours records"
     },
     "/settings/{docId}": {
       "schema": "systemSettings",

@@ -1,6 +1,6 @@
 {
   "name": "MedClock Kiosk",
-  "description": "ZRG Medical's secure time clock kiosk with automated photo verification, real-time sync, and administrative shift records.",
+  "description": "ZRG Medical's secure time clock kiosk with automated photo verification, real-time sync, administrative shift records, designated holiday pay tracking, and comprehensive payroll reporting.",
   "requestFramePermissions": ["camera"],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

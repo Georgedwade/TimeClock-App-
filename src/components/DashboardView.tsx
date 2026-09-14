@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { supabaseService, safeLocalStorage } from '../services/supabaseService';
 import { notificationService } from '../services/notificationService';
-import { TimeLog, Employee, LogType, PTORequest } from '../types';
+import { TimeLog, Employee, LogType, PTORequest, HolidayRecord } from '../types';
 import { 
   Users, 
   History, 
@@ -12,6 +12,7 @@ import {
   Clock,
   ArrowLeft,
   ChevronRight,
+  ChevronLeft,
   Search,
   Filter,
   Download,
@@ -23,13 +24,26 @@ import {
   FileText,
   Plus,
   CheckCircle,
-  XCircle
+  XCircle,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RegisterEmployeeModal } from './RegisterEmployeeModal';
 import { ReportView } from './ReportView';
+import { AddHolidayModal } from './AddHolidayModal';
 import { cn, formatDate, formatTime } from '../lib/utils';
-import { differenceInMinutes, subDays, format } from 'date-fns';
+import { 
+  differenceInMinutes, 
+  subDays, 
+  format,
+  startOfMonth,
+  endOfMonth,
+  subMonths,
+  isWithinInterval,
+  startOfDay,
+  endOfDay,
+  parseISO
+} from 'date-fns';
 import Papa from 'papaparse';
 
 const logTypePriority: Record<LogType, number> = {
@@ -189,7 +203,9 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
     clockOutTime: '17:00',
     breakStartTime: '',
     breakEndTime: '',
-    note: ''
+    note: '',
+    isHoliday: false,
+    holidayName: ''
   });
 
   useEffect(() => {
@@ -198,6 +214,8 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
       const clockOut = initialShift.clockOut;
       const breakStart = initialShift.breaks[0]?.start;
       const breakEnd = initialShift.breaks[0]?.end;
+      const isHoliday = !!(clockIn.isHoliday || initialShift.notes.some(n => n.toUpperCase().includes('[HOLIDAY]')));
+      const holidayName = clockIn.holidayName || (isHoliday ? 'Holiday Shift' : '');
 
       setFormData({
         employeeId: initialShift.employeeId,
@@ -206,7 +224,9 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
         clockOutTime: clockOut ? format(clockOut.timestamp, 'HH:mm') : '17:00',
         breakStartTime: breakStart ? format(breakStart.timestamp, 'HH:mm') : '',
         breakEndTime: breakEnd ? format(breakEnd.timestamp, 'HH:mm') : '',
-        note: clockIn.note || ''
+        note: clockIn.note || '',
+        isHoliday,
+        holidayName
       });
     } else {
       setFormData({
@@ -216,7 +236,9 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
         clockOutTime: '17:00',
         breakStartTime: '',
         breakEndTime: '',
-        note: ''
+        note: '',
+        isHoliday: false,
+        holidayName: ''
       });
     }
   }, [initialShift]);
@@ -239,13 +261,19 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
       const [hours, minutes] = time.split(':').map(Number);
       const timestamp = new Date(year, month - 1, day, hours, minutes, 0, 0);
       
+      const holidayPrefix = formData.isHoliday 
+        ? `[HOLIDAY] ${formData.holidayName ? formData.holidayName + ': ' : ''}` 
+        : '';
+
       logs.push({
         employeeId: formData.employeeId,
         employeeName: employee.name,
         type,
         timestamp,
         photoUrl: '', // Manual entries don't have a photo
-        note: formData.note || 'Manually entered shift'
+        note: `${holidayPrefix}${formData.note || 'Manually entered shift'}`.trim(),
+        isHoliday: formData.isHoliday,
+        holidayName: formData.isHoliday ? (formData.holidayName || 'Holiday Shift') : undefined
       });
     };
 
@@ -368,6 +396,35 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
               className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 font-bold text-sm outline-none focus:border-zrg-blue transition-all min-h-[80px] resize-none"
               placeholder="Manager notes regarding this manual entry..."
             />
+          </div>
+
+          <div className="p-4 bg-indigo-50/70 rounded-xl border border-indigo-100 space-y-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={formData.isHoliday}
+                onChange={e => setFormData({ ...formData, isHoliday: e.target.checked })}
+                className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+              />
+              <span className="text-xs font-black uppercase tracking-wider text-indigo-950 flex items-center gap-1.5">
+                <Sparkles size={14} className="text-indigo-600" />
+                Designate as Holiday Hours / Holiday Shift
+              </span>
+            </label>
+            {formData.isHoliday && (
+              <div className="pt-2">
+                <label className="text-[9px] font-black text-indigo-800 uppercase tracking-widest block mb-1">
+                  Holiday Name (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g., Labor Day, Memorial Day, Christmas Day"
+                  value={formData.holidayName}
+                  onChange={e => setFormData({ ...formData, holidayName: e.target.value })}
+                  className="w-full bg-white border border-indigo-200 rounded-lg px-3 py-2 text-xs font-bold text-indigo-950 outline-none focus:border-indigo-600 transition-all"
+                />
+              </div>
+            )}
           </div>
 
           <button 
@@ -663,17 +720,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [logs, setLogs] = useState<TimeLog[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [ptoRequests, setPtoRequests] = useState<PTORequest[]>([]);
+  const [holidayRecords, setHolidayRecords] = useState<HolidayRecord[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [isManualPTOModalOpen, setIsManualPTOModalOpen] = useState(false);
   const [isManualShiftModalOpen, setIsManualShiftModalOpen] = useState(false);
+  const [isAddHolidayModalOpen, setIsAddHolidayModalOpen] = useState(false);
   const [editingShift, setEditingShift] = useState<ShiftSummary | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [editingLog, setEditingLog] = useState<TimeLog | null>(null);
   const [expandedShiftId, setExpandedShiftId] = useState<string | null>(null);
   const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+
+  // Shift Records Filter & Pagination State
+  const [shiftEmployeeFilter, setShiftEmployeeFilter] = useState('ALL');
+  const [shiftDatePreset, setShiftDatePreset] = useState<'all' | 'this_month' | 'last_month' | 'last_30' | 'custom'>('all');
+  const [shiftStartDate, setShiftStartDate] = useState('');
+  const [shiftEndDate, setShiftEndDate] = useState('');
+  const [shiftPage, setShiftPage] = useState(1);
+  const shiftPageSize = 25;
+
+  const dateBounds = useMemo(() => {
+    if (!logs || logs.length === 0) return { earliest: new Date(), latest: new Date() };
+    let minTime = Infinity;
+    let maxTime = -Infinity;
+    logs.forEach(l => {
+      const t = l.timestamp.getTime();
+      if (!isNaN(t)) {
+        if (t < minTime) minTime = t;
+        if (t > maxTime) maxTime = t;
+      }
+    });
+    return {
+      earliest: isFinite(minTime) ? new Date(minTime) : new Date(),
+      latest: isFinite(maxTime) ? new Date(maxTime) : new Date()
+    };
+  }, [logs]);
 
   // PTO Filter & Search State
   const [ptoSearchQuery, setPtoSearchQuery] = useState('');
@@ -838,6 +922,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     const unsubLogs = supabaseService.subscribeToLogs(setLogs);
     const unsubEmployees = supabaseService.subscribeToEmployees(setEmployees);
     const unsubPTO = supabaseService.subscribeToPTORequests(setPtoRequests);
+    const unsubHoliday = supabaseService.subscribeToHolidayRecords(setHolidayRecords);
     const unsubSettings = supabaseService.subscribeToSettings((s) => {
       setRequirePhotoVerification(s.requirePhotoVerification);
     });
@@ -845,9 +930,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       unsubLogs();
       unsubEmployees();
       unsubPTO();
+      unsubHoliday();
       unsubSettings();
     };
   }, []);
+
+  const handleSaveHolidayRecords = async (records: Omit<HolidayRecord, 'id'>[]) => {
+    await supabaseService.addBatchHolidayRecords(records);
+  };
+
+  const handleDeleteHolidayRecord = async (id: string) => {
+    await supabaseService.deleteHolidayRecord(id);
+  };
 
 
   const openApproveModal = (request: PTORequest) => {
@@ -1147,14 +1241,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       Employee: l.employeeName,
       Action: l.type.replace('_', ' ').toUpperCase(),
       Note: l.note || '',
-      Photo: l.photoUrl
+      Photo: l.photoUrl ? (l.photoUrl.startsWith('data:') ? 'Photo Captured (Base64)' : l.photoUrl) : 'None'
     }));
     const csv = Papa.unparse(exportData);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `medclock_logs_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+    link.setAttribute("download", `medclock_logs_all_${format(new Date(), 'yyyy-MM-dd')}.csv`);
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
@@ -1339,10 +1433,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   }, [logs]);
 
   const filteredShifts = useMemo(() => {
-    return summarizedShifts.filter(s => 
-      s.employeeName.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [summarizedShifts, searchQuery]);
+    return summarizedShifts.filter(s => {
+      // 1. Employee filter
+      if (shiftEmployeeFilter !== 'ALL' && s.employeeId !== shiftEmployeeFilter) {
+        return false;
+      }
+      // 2. Search query filter (matches name or formatted date)
+      if (searchQuery.trim() !== '') {
+        const q = searchQuery.toLowerCase().trim();
+        const matchesName = s.employeeName.toLowerCase().includes(q);
+        const matchesDate = formatDate(s.clockIn.timestamp).toLowerCase().includes(q);
+        if (!matchesName && !matchesDate) {
+          return false;
+        }
+      }
+      // 3. Date presets / range
+      if (shiftDatePreset === 'this_month') {
+        const start = startOfMonth(new Date());
+        const end = endOfMonth(new Date());
+        return isWithinInterval(s.clockIn.timestamp, { start, end });
+      } else if (shiftDatePreset === 'last_month') {
+        const prevMonth = subMonths(new Date(), 1);
+        const start = startOfMonth(prevMonth);
+        const end = endOfMonth(prevMonth);
+        return isWithinInterval(s.clockIn.timestamp, { start, end });
+      } else if (shiftDatePreset === 'last_30') {
+        const start = subDays(new Date(), 30);
+        const end = endOfDay(new Date());
+        return isWithinInterval(s.clockIn.timestamp, { start, end });
+      } else if (shiftDatePreset === 'custom' && shiftStartDate && shiftEndDate) {
+        const start = startOfDay(parseISO(shiftStartDate));
+        const end = endOfDay(parseISO(shiftEndDate));
+        return isWithinInterval(s.clockIn.timestamp, { start, end });
+      }
+      return true;
+    });
+  }, [summarizedShifts, searchQuery, shiftEmployeeFilter, shiftDatePreset, shiftStartDate, shiftEndDate]);
+
+  const totalShiftPages = Math.max(1, Math.ceil(filteredShifts.length / shiftPageSize));
+
+  const paginatedShifts = useMemo(() => {
+    const startIdx = (shiftPage - 1) * shiftPageSize;
+    return filteredShifts.slice(startIdx, startIdx + shiftPageSize);
+  }, [filteredShifts, shiftPage, shiftPageSize]);
 
   const filteredPTORequests = useMemo(() => {
     return ptoRequests.filter(req => {
@@ -1482,6 +1615,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
               logs={logs} 
               employees={employees} 
               ptoRequests={ptoRequests} 
+              holidayRecords={holidayRecords}
+              onAddHoliday={() => setIsAddHolidayModalOpen(true)}
+              onDeleteHoliday={handleDeleteHolidayRecord}
             />
           )}
 
@@ -1541,32 +1677,136 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
           {activeTab === 'logs' && (
             <div className="max-w-6xl mx-auto">
-              <div className="flex items-center justify-between gap-6 mb-12">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
                 <div>
                   <h1 className="text-3xl font-black text-slate-900 uppercase tracking-tighter">Shift Records</h1>
                   <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-1">Audit log of all personnel activity</p>
+                  <div className="inline-flex items-center gap-2 mt-2 px-3 py-1 bg-slate-100 rounded-full text-[10px] font-bold text-slate-600">
+                    <span className="w-2 h-2 rounded-full bg-zrg-green animate-pulse" />
+                    Archive: {logs.length.toLocaleString()} punch records loaded ({formatDate(dateBounds.earliest)} – {formatDate(dateBounds.latest)})
+                  </div>
                 </div>
-                <button 
-                  onClick={() => setIsManualShiftModalOpen(true)}
-                  className="bg-zrg-blue text-white px-8 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-zrg-blue/10 flex items-center gap-2"
-                >
-                  <Plus size={14} />
-                  Add Record
-                </button>
-
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={handleExport}
+                    className="bg-white border border-slate-200 hover:border-zrg-blue text-zrg-navy px-6 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center gap-2 transition-all shadow-sm cursor-pointer"
+                  >
+                    <Download size={14} />
+                    Export CSV
+                  </button>
+                  <button 
+                    onClick={() => setIsAddHolidayModalOpen(true)}
+                    className="bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white px-6 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-indigo-600/15 flex items-center gap-2 cursor-pointer transition-all"
+                  >
+                    <Sparkles size={14} className="text-amber-300" />
+                    Add Holiday Hours
+                  </button>
+                  <button 
+                    onClick={() => setIsManualShiftModalOpen(true)}
+                    className="bg-zrg-blue text-white px-8 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-zrg-blue/10 flex items-center gap-2 cursor-pointer hover:bg-opacity-90 transition-all"
+                  >
+                    <Plus size={14} />
+                    Add Record
+                  </button>
+                </div>
               </div>
-                <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                  <input 
-                    type="text" 
-                    placeholder="FILTER BY NAME..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="bg-white border border-slate-200 rounded-xl pl-12 pr-6 py-3 w-64 text-[11px] font-bold uppercase tracking-widest focus:border-blue-400 outline-none transition-all shadow-sm"
-                  />
+
+              {/* Filters Bar */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 mb-6">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  {/* Quick Period Presets */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mr-1">Period:</span>
+                    {[
+                      { id: 'all', label: 'All Records' },
+                      { id: 'this_month', label: 'This Month' },
+                      { id: 'last_month', label: 'Last Month' },
+                      { id: 'last_30', label: 'Last 30 Days' },
+                      { id: 'custom', label: 'Custom Range' },
+                    ].map(preset => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setShiftDatePreset(preset.id as any);
+                          setShiftPage(1);
+                        }}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer border",
+                          shiftDatePreset === preset.id
+                            ? "bg-zrg-navy text-white border-zrg-navy shadow-sm"
+                            : "bg-white text-slate-600 border-slate-200 hover:border-zrg-blue hover:text-zrg-blue"
+                        )}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Search and Employee Select */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <select
+                      value={shiftEmployeeFilter}
+                      onChange={(e) => {
+                        setShiftEmployeeFilter(e.target.value);
+                        setShiftPage(1);
+                      }}
+                      className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-700 outline-none focus:border-zrg-blue transition-all cursor-pointer"
+                    >
+                      <option value="ALL">ALL PERSONNEL</option>
+                      {employees.map(emp => (
+                        <option key={emp.id} value={emp.id}>{emp.name.toUpperCase()}</option>
+                      ))}
+                    </select>
+
+                    <div className="relative">
+                      <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300" size={14} />
+                      <input 
+                        type="text" 
+                        placeholder="SEARCH NAME OR DATE..."
+                        value={searchQuery}
+                        onChange={(e) => {
+                          setSearchQuery(e.target.value);
+                          setShiftPage(1);
+                        }}
+                        className="bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2.5 w-60 text-[11px] font-bold uppercase tracking-wider focus:border-zrg-blue outline-none transition-all"
+                      />
+                    </div>
+                  </div>
                 </div>
 
-              <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm mt-8">
+                {/* Custom Date Range Inputs if "custom" selected */}
+                {shiftDatePreset === 'custom' && (
+                  <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">From:</label>
+                      <input 
+                        type="date"
+                        value={shiftStartDate}
+                        onChange={e => {
+                          setShiftStartDate(e.target.value);
+                          setShiftPage(1);
+                        }}
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">To:</label>
+                      <input 
+                        type="date"
+                        value={shiftEndDate}
+                        onChange={e => {
+                          setShiftEndDate(e.target.value);
+                          setShiftPage(1);
+                        }}
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                 <table className="w-full text-left">
                   <thead>
                     <tr className="bg-slate-50/50 border-b border-slate-100">
@@ -1577,7 +1817,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {filteredShifts.map((shift) => (
+                    {paginatedShifts.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-8 py-16 text-center text-slate-400 font-bold text-xs uppercase tracking-widest">
+                          No shift records match your current filter criteria.
+                        </td>
+                      </tr>
+                    ) : (
+                      paginatedShifts.map((shift) => (
                       <React.Fragment key={shift.id}>
                         <tr 
                           onClick={() => setExpandedShiftId(expandedShiftId === shift.id ? null : shift.id)}
@@ -1716,9 +1963,39 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                           </tr>
                         )}
                       </React.Fragment>
-                    ))}
+                    )))}
                   </tbody>
                 </table>
+
+                {/* Pagination Controls */}
+                {filteredShifts.length > 0 && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-8 py-4 bg-slate-50/50 border-t border-slate-100">
+                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                      Showing <span className="text-zrg-navy font-black">{(shiftPage - 1) * shiftPageSize + 1}</span>–<span className="text-zrg-navy font-black">{Math.min(shiftPage * shiftPageSize, filteredShifts.length)}</span> of <span className="text-zrg-navy font-black">{filteredShifts.length}</span> shifts ({summarizedShifts.length} total)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShiftPage(p => Math.max(1, p - 1))}
+                        disabled={shiftPage === 1}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-600 bg-white hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-all"
+                      >
+                        <ChevronLeft size={14} />
+                        Prev
+                      </button>
+                      <span className="text-[11px] font-bold text-slate-600 px-2">
+                        Page {shiftPage} of {totalShiftPages}
+                      </span>
+                      <button
+                        onClick={() => setShiftPage(p => Math.min(totalShiftPages, p + 1))}
+                        disabled={shiftPage >= totalShiftPages}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-600 bg-white hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-all"
+                      >
+                        Next
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -2399,6 +2676,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
             employees={employees}
             onSubmit={handleManualShiftAdd}
             initialShift={editingShift}
+          />
+        )}
+
+        {isAddHolidayModalOpen && (
+          <AddHolidayModal
+            key="add-holiday-modal"
+            isOpen={isAddHolidayModalOpen}
+            onClose={() => setIsAddHolidayModalOpen(false)}
+            employees={employees}
+            onSave={handleSaveHolidayRecords}
           />
         )}
 
