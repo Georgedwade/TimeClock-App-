@@ -86,6 +86,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
   const [expandedEmployee, setExpandedEmployee] = useState<string | null>(null);
   const [activePreset, setActivePreset] = useState<string>('this_month');
   const [isAddHolidayModalOpen, setIsAddHolidayModalOpen] = useState(false);
+  const [confirmingDeleteHolidayId, setConfirmingDeleteHolidayId] = useState<string | null>(null);
   
   // Local fallback subscription for holiday records
   const [localHolidayRecords, setLocalHolidayRecords] = useState<HolidayRecord[]>([]);
@@ -498,13 +499,16 @@ export const ReportView: React.FC<ReportViewProps> = ({
   };
 
   const handleDeleteHoliday = async (id: string) => {
-    if (!window.confirm('Are you sure you want to remove this holiday hours entry?')) return;
-    if (propOnDeleteHoliday) {
-      await propOnDeleteHoliday(id);
-    } else {
-      await supabaseService.deleteHolidayRecord(id);
-      const updated = await supabaseService.getHolidayRecords();
-      setLocalHolidayRecords(updated);
+    try {
+      if (propOnDeleteHoliday) {
+        await propOnDeleteHoliday(id);
+      } else {
+        await supabaseService.deleteHolidayRecord(id);
+        const updated = await supabaseService.getHolidayRecords();
+        setLocalHolidayRecords(updated);
+      }
+    } catch (err) {
+      console.error('Failed to delete holiday record:', err);
     }
   };
 
@@ -1144,12 +1148,23 @@ export const ReportView: React.FC<ReportViewProps> = ({
                                                 type="button"
                                                 onClick={(e) => {
                                                   e.stopPropagation();
-                                                  handleDeleteHoliday(hol.id!);
+                                                  if (confirmingDeleteHolidayId === hol.id) {
+                                                    handleDeleteHoliday(hol.id!);
+                                                    setConfirmingDeleteHolidayId(null);
+                                                  } else {
+                                                    setConfirmingDeleteHolidayId(hol.id!);
+                                                    setTimeout(() => setConfirmingDeleteHolidayId(null), 3000);
+                                                  }
                                                 }}
-                                                title="Delete Holiday Entry"
-                                                className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded transition-colors"
+                                                title={confirmingDeleteHolidayId === hol.id ? "Click again to confirm delete" : "Delete Holiday Entry"}
+                                                className={cn(
+                                                  "p-1 rounded transition-all",
+                                                  confirmingDeleteHolidayId === hol.id
+                                                    ? "bg-rose-500 text-white font-black text-[9px] px-2 py-0.5 animate-pulse"
+                                                    : "hover:bg-rose-50 text-slate-400 hover:text-rose-600"
+                                                )}
                                               >
-                                                <Trash2 size={13} />
+                                                {confirmingDeleteHolidayId === hol.id ? 'Confirm?' : <Trash2 size={13} />}
                                               </button>
                                             )}
                                           </div>

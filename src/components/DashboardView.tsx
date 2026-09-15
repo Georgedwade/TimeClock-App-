@@ -25,7 +25,8 @@ import {
   Plus,
   CheckCircle,
   XCircle,
-  Sparkles
+  Sparkles,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RegisterEmployeeModal } from './RegisterEmployeeModal';
@@ -185,6 +186,9 @@ interface ShiftSummary {
   totalBreakMinutes: number;
   totalWorkedMinutes: number;
   allLogs: TimeLog[];
+  notes?: string[];
+  isHoliday?: boolean;
+  holidayName?: string;
 }
 
 interface ManualShiftModalProps {
@@ -194,6 +198,21 @@ interface ManualShiftModalProps {
   onSubmit: (logs: Omit<TimeLog, 'id'>[], oldLogIds?: string[]) => Promise<void>;
   initialShift?: ShiftSummary | null;
 }
+
+const toValidDate = (val: any): Date => {
+  if (!val) return new Date();
+  if (val instanceof Date) return isNaN(val.getTime()) ? new Date() : val;
+  if (typeof val === 'object' && 'toDate' in val && typeof val.toDate === 'function') {
+    try {
+      const d = val.toDate();
+      if (d instanceof Date && !isNaN(d.getTime())) return d;
+    } catch {
+      // fallback
+    }
+  }
+  const parsed = new Date(val);
+  return isNaN(parsed.getTime()) ? new Date() : parsed;
+};
 
 const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, employees, onSubmit, initialShift }) => {
   const [formData, setFormData] = useState({
@@ -207,24 +226,40 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
     isHoliday: false,
     holidayName: ''
   });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
-    if (initialShift) {
+    if (initialShift && initialShift.clockIn) {
       const clockIn = initialShift.clockIn;
       const clockOut = initialShift.clockOut;
-      const breakStart = initialShift.breaks[0]?.start;
-      const breakEnd = initialShift.breaks[0]?.end;
-      const isHoliday = !!(clockIn.isHoliday || initialShift.notes.some(n => n.toUpperCase().includes('[HOLIDAY]')));
-      const holidayName = clockIn.holidayName || (isHoliday ? 'Holiday Shift' : '');
+      const breakStart = initialShift.breaks?.[0]?.start;
+      const breakEnd = initialShift.breaks?.[0]?.end;
+
+      const clockInDate = toValidDate(clockIn.timestamp);
+      const clockOutDate = clockOut?.timestamp ? toValidDate(clockOut.timestamp) : null;
+      const breakStartDate = breakStart?.timestamp ? toValidDate(breakStart.timestamp) : null;
+      const breakEndDate = breakEnd?.timestamp ? toValidDate(breakEnd.timestamp) : null;
+
+      const notesList = initialShift.notes || (initialShift.allLogs || []).map(l => l?.note).filter(Boolean) as string[];
+      const hasHolidayNote = notesList.some(n => typeof n === 'string' && n.toUpperCase().includes('[HOLIDAY]'));
+      const hasHolidayLog = (initialShift.allLogs || []).some(l => l?.isHoliday);
+      const isHoliday = !!(clockIn.isHoliday || hasHolidayLog || hasHolidayNote);
+      
+      const holidayName = clockIn.holidayName || 
+        (initialShift.allLogs || []).find(l => l?.holidayName)?.holidayName || 
+        (isHoliday ? 'Holiday Shift' : '');
+
+      const rawNote = clockIn.note || (initialShift.allLogs || []).find(l => l?.note)?.note || '';
+      const cleanNote = rawNote.replace(/^\[HOLIDAY\]\s*([^:]+:\s*)?/i, '').trim();
 
       setFormData({
-        employeeId: initialShift.employeeId,
-        date: format(clockIn.timestamp, 'yyyy-MM-dd'),
-        clockInTime: format(clockIn.timestamp, 'HH:mm'),
-        clockOutTime: clockOut ? format(clockOut.timestamp, 'HH:mm') : '17:00',
-        breakStartTime: breakStart ? format(breakStart.timestamp, 'HH:mm') : '',
-        breakEndTime: breakEnd ? format(breakEnd.timestamp, 'HH:mm') : '',
-        note: clockIn.note || '',
+        employeeId: initialShift.employeeId || '',
+        date: format(clockInDate, 'yyyy-MM-dd'),
+        clockInTime: format(clockInDate, 'HH:mm'),
+        clockOutTime: clockOutDate ? format(clockOutDate, 'HH:mm') : '17:00',
+        breakStartTime: breakStartDate ? format(breakStartDate, 'HH:mm') : '',
+        breakEndTime: breakEndDate ? format(breakEndDate, 'HH:mm') : '',
+        note: cleanNote,
         isHoliday,
         holidayName
       });
@@ -253,48 +288,56 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
       return;
     }
 
-    const logs: Omit<TimeLog, 'id'>[] = [];
-    
-    const createLog = (time: string, type: LogType) => {
-      if (!time) return;
-      const [year, month, day] = formData.date.split('-').map(Number);
-      const [hours, minutes] = time.split(':').map(Number);
-      const timestamp = new Date(year, month - 1, day, hours, minutes, 0, 0);
+    setIsSubmitting(true);
+    try {
+      const logs: Omit<TimeLog, 'id'>[] = [];
       
-      const holidayPrefix = formData.isHoliday 
-        ? `[HOLIDAY] ${formData.holidayName ? formData.holidayName + ': ' : ''}` 
-        : '';
+      const createLog = (time: string, type: LogType) => {
+        if (!time) return;
+        const [year, month, day] = formData.date.split('-').map(Number);
+        const [hours, minutes] = time.split(':').map(Number);
+        const timestamp = new Date(year, month - 1, day, hours, minutes, 0, 0);
+        
+        const holidayPrefix = formData.isHoliday 
+          ? `[HOLIDAY] ${formData.holidayName ? formData.holidayName + ': ' : ''}` 
+          : '';
 
-      logs.push({
-        employeeId: formData.employeeId,
-        employeeName: employee.name,
-        type,
-        timestamp,
-        photoUrl: '', // Manual entries don't have a photo
-        note: `${holidayPrefix}${formData.note || 'Manually entered shift'}`.trim(),
-        isHoliday: formData.isHoliday,
-        holidayName: formData.isHoliday ? (formData.holidayName || 'Holiday Shift') : undefined
+        logs.push({
+          employeeId: formData.employeeId,
+          employeeName: employee.name,
+          type,
+          timestamp,
+          photoUrl: '', // Manual entries don't have a photo
+          note: `${holidayPrefix}${formData.note || 'Manually entered shift'}`.trim(),
+          isHoliday: formData.isHoliday,
+          holidayName: formData.isHoliday ? (formData.holidayName || 'Holiday Shift') : undefined
+        });
+      };
+
+      // Add logs in logical order
+      createLog(formData.clockInTime, LogType.CLOCK_IN);
+      if (formData.breakStartTime) createLog(formData.breakStartTime, LogType.BREAK_START);
+      if (formData.breakEndTime) createLog(formData.breakEndTime, LogType.BREAK_END);
+      createLog(formData.clockOutTime, LogType.CLOCK_OUT);
+
+      // Sort logs by timestamp and logical chronological order just in case
+      logs.sort((a, b) => {
+        const timeDiff = a.timestamp.getTime() - b.timestamp.getTime();
+        if (timeDiff !== 0) return timeDiff;
+        const prioA = logTypePriority[a.type as LogType] || 0;
+        const prioB = logTypePriority[b.type as LogType] || 0;
+        return prioA - prioB;
       });
-    };
 
-    // Add logs in logical order
-    createLog(formData.clockInTime, LogType.CLOCK_IN);
-    if (formData.breakStartTime) createLog(formData.breakStartTime, LogType.BREAK_START);
-    if (formData.breakEndTime) createLog(formData.breakEndTime, LogType.BREAK_END);
-    createLog(formData.clockOutTime, LogType.CLOCK_OUT);
-
-    // Sort logs by timestamp and logical chronological order just in case
-    logs.sort((a, b) => {
-      const timeDiff = a.timestamp.getTime() - b.timestamp.getTime();
-      if (timeDiff !== 0) return timeDiff;
-      const prioA = logTypePriority[a.type as LogType] || 0;
-      const prioB = logTypePriority[b.type as LogType] || 0;
-      return prioA - prioB;
-    });
-
-    const oldLogIds = initialShift?.allLogs.map(l => l.id).filter((id): id is string => !!id);
-    await onSubmit(logs, oldLogIds);
-    onClose();
+      const oldLogIds = (initialShift?.allLogs || []).map(l => l.id).filter((id): id is string => !!id);
+      await onSubmit(logs, oldLogIds);
+      onClose();
+    } catch (err: any) {
+      console.error('Failed to submit manual shift:', err);
+      alert('Error saving shift: ' + (err.message || String(err)));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -429,9 +472,12 @@ const ManualShiftModal: React.FC<ManualShiftModalProps> = ({ isOpen, onClose, em
 
           <button 
             type="submit"
-            className="w-full bg-zrg-blue text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-zrg-blue/20"
+            disabled={isSubmitting}
+            className="w-full bg-zrg-blue hover:bg-opacity-90 disabled:opacity-50 text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-zrg-blue/20 transition-all cursor-pointer disabled:cursor-not-allowed"
           >
-            {initialShift ? 'Save Shift Changes' : 'Create All Records'}
+            {isSubmitting 
+              ? 'Saving Changes...' 
+              : (initialShift ? 'Save Shift Changes' : 'Create All Records')}
           </button>
         </form>
       </motion.div>
@@ -539,9 +585,10 @@ const ManualPTOModal: React.FC<ManualPTOModalProps> = ({ isOpen, onClose, employ
               <input 
                 type="number" 
                 required
-                step="0.5"
+                step="any"
+                min="0.01"
                 value={formData.hoursRequested}
-                onChange={e => setFormData({ ...formData, hoursRequested: parseFloat(e.target.value) })}
+                onChange={e => setFormData({ ...formData, hoursRequested: parseFloat(e.target.value) || 0 })}
                 className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 font-bold text-sm outline-none focus:border-zrg-blue transition-all tabular-nums"
               />
             </div>
@@ -730,6 +777,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [editingShift, setEditingShift] = useState<ShiftSummary | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [editingLog, setEditingLog] = useState<TimeLog | null>(null);
+  const [viewingPhotoUrl, setViewingPhotoUrl] = useState<string | null>(null);
   const [expandedShiftId, setExpandedShiftId] = useState<string | null>(null);
   const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -739,6 +787,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [shiftDatePreset, setShiftDatePreset] = useState<'all' | 'this_month' | 'last_month' | 'last_30' | 'custom'>('all');
   const [shiftStartDate, setShiftStartDate] = useState('');
   const [shiftEndDate, setShiftEndDate] = useState('');
+  const [shiftRecordTypeFilter, setShiftRecordTypeFilter] = useState<'all' | 'shifts' | 'holidays'>('all');
+  const [confirmingDeleteHolidayId, setConfirmingDeleteHolidayId] = useState<string | null>(null);
   const [shiftPage, setShiftPage] = useState(1);
   const shiftPageSize = 25;
 
@@ -1235,20 +1285,50 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   }, [employees, logs]);
 
   const handleExport = () => {
-    const exportData = logs.map(l => ({
+    const exportData: any[] = logs.map(l => ({
       Date: formatDate(l.timestamp),
       Time: formatTime(l.timestamp),
       Employee: l.employeeName,
+      Type: 'PUNCH LOG',
       Action: l.type.replace('_', ' ').toUpperCase(),
+      Hours: '',
       Note: l.note || '',
       Photo: l.photoUrl ? (l.photoUrl.startsWith('data:') ? 'Photo Captured (Base64)' : l.photoUrl) : 'None'
     }));
+
+    holidayRecords.forEach(h => {
+      try {
+        const d = parseISO(h.date);
+        exportData.push({
+          Date: formatDate(d),
+          Time: 'All Day',
+          Employee: h.employeeName,
+          Type: 'HOLIDAY RECORD',
+          Action: `PAID HOLIDAY (${h.holidayName})`,
+          Hours: h.hours.toFixed(2),
+          Note: `[HOLIDAY HOURS] ${h.holidayName}${h.note ? ' - ' + h.note : ''}`,
+          Photo: 'None'
+        });
+      } catch (e) {
+        exportData.push({
+          Date: h.date,
+          Time: 'All Day',
+          Employee: h.employeeName,
+          Type: 'HOLIDAY RECORD',
+          Action: `PAID HOLIDAY (${h.holidayName})`,
+          Hours: h.hours.toFixed(2),
+          Note: `[HOLIDAY HOURS] ${h.holidayName}${h.note ? ' - ' + h.note : ''}`,
+          Photo: 'None'
+        });
+      }
+    });
+
     const csv = Papa.unparse(exportData);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `medclock_logs_all_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+    link.setAttribute("download", `medclock_records_${format(new Date(), 'yyyy-MM-dd')}.csv`);
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
@@ -1320,6 +1400,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                 totalWorkedMinutes = Math.max(0, totalRawMinutes - totalBreakMinutes);
               }
 
+              const isHoliday = !!(activeShift.clockIn.isHoliday || activeShift.allLogs.some(l => l.isHoliday || (l.note && l.note.toUpperCase().includes('[HOLIDAY]'))));
+              const holidayName = activeShift.clockIn.holidayName || (activeShift.allLogs.find(l => l.holidayName)?.holidayName) || (isHoliday ? 'Holiday Shift' : undefined);
+
               shifts.push({
                 id: activeShift.clockIn.id || `shift-${activeShift.clockIn.timestamp.getTime()}`,
                 employeeId,
@@ -1329,7 +1412,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                 breaks: activeShift.breaks,
                 totalBreakMinutes,
                 totalWorkedMinutes,
-                allLogs: activeShift.allLogs
+                allLogs: activeShift.allLogs,
+                notes: Array.from(new Set(activeShift.allLogs.map(l => l.note).filter(Boolean))) as string[],
+                isHoliday,
+                holidayName
               });
 
               // Start new shift
@@ -1415,6 +1501,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           }
         }
 
+        const isHoliday = !!(activeShift.clockIn.isHoliday || activeShift.allLogs.some(l => l.isHoliday || (l.note && l.note.toUpperCase().includes('[HOLIDAY]'))));
+        const holidayName = activeShift.clockIn.holidayName || (activeShift.allLogs.find(l => l.holidayName)?.holidayName) || (isHoliday ? 'Holiday Shift' : undefined);
+
         shifts.push({
           id: activeShift.clockIn.id || `shift-${activeShift.clockIn.timestamp.getTime()}`,
           employeeId,
@@ -1424,7 +1513,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           breaks: activeShift.breaks,
           totalBreakMinutes,
           totalWorkedMinutes,
-          allLogs: activeShift.allLogs
+          allLogs: activeShift.allLogs,
+          notes: Array.from(new Set(activeShift.allLogs.map(l => l.note).filter(Boolean))) as string[],
+          isHoliday,
+          holidayName
         });
       }
     });
@@ -1438,12 +1530,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       if (shiftEmployeeFilter !== 'ALL' && s.employeeId !== shiftEmployeeFilter) {
         return false;
       }
-      // 2. Search query filter (matches name or formatted date)
+      // 2. Search query filter (matches name, formatted date, or holiday name)
       if (searchQuery.trim() !== '') {
         const q = searchQuery.toLowerCase().trim();
         const matchesName = s.employeeName.toLowerCase().includes(q);
         const matchesDate = formatDate(s.clockIn.timestamp).toLowerCase().includes(q);
-        if (!matchesName && !matchesDate) {
+        const matchesHoliday = s.holidayName ? s.holidayName.toLowerCase().includes(q) : false;
+        if (!matchesName && !matchesDate && !matchesHoliday) {
           return false;
         }
       }
@@ -1470,12 +1563,104 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     });
   }, [summarizedShifts, searchQuery, shiftEmployeeFilter, shiftDatePreset, shiftStartDate, shiftEndDate]);
 
-  const totalShiftPages = Math.max(1, Math.ceil(filteredShifts.length / shiftPageSize));
+  const filteredHolidayRecords = useMemo(() => {
+    return holidayRecords.filter(h => {
+      // 1. Employee filter
+      if (shiftEmployeeFilter !== 'ALL' && h.employeeId !== shiftEmployeeFilter && h.employeeId !== 'ALL') {
+        return false;
+      }
+      // 2. Search query filter
+      if (searchQuery.trim() !== '') {
+        const q = searchQuery.toLowerCase().trim();
+        const matchesName = (h.employeeName || '').toLowerCase().includes(q);
+        const matchesHoliday = (h.holidayName || '').toLowerCase().includes(q);
+        const matchesDate = h.date.toLowerCase().includes(q);
+        const matchesNote = (h.note || '').toLowerCase().includes(q);
+        if (!matchesName && !matchesHoliday && !matchesDate && !matchesNote) {
+          return false;
+        }
+      }
+      // 3. Date presets / range
+      try {
+        const holDate = parseISO(h.date);
+        if (shiftDatePreset === 'this_month') {
+          const start = startOfMonth(new Date());
+          const end = endOfMonth(new Date());
+          return isWithinInterval(holDate, { start, end });
+        } else if (shiftDatePreset === 'last_month') {
+          const prevMonth = subMonths(new Date(), 1);
+          const start = startOfMonth(prevMonth);
+          const end = endOfMonth(prevMonth);
+          return isWithinInterval(holDate, { start, end });
+        } else if (shiftDatePreset === 'last_30') {
+          const start = subDays(new Date(), 30);
+          const end = endOfDay(new Date());
+          return isWithinInterval(holDate, { start, end });
+        } else if (shiftDatePreset === 'custom' && shiftStartDate && shiftEndDate) {
+          const start = startOfDay(parseISO(shiftStartDate));
+          const end = endOfDay(parseISO(shiftEndDate));
+          return isWithinInterval(holDate, { start, end });
+        }
+      } catch (e) {
+        return true;
+      }
+      return true;
+    });
+  }, [holidayRecords, searchQuery, shiftEmployeeFilter, shiftDatePreset, shiftStartDate, shiftEndDate]);
 
-  const paginatedShifts = useMemo(() => {
+  type ShiftRecordItem = 
+    | { type: 'shift'; id: string; date: Date; shift: ShiftSummary }
+    | { type: 'holiday'; id: string; date: Date; holiday: HolidayRecord };
+
+  const combinedRecordItems = useMemo<ShiftRecordItem[]>(() => {
+    const shiftItems: ShiftRecordItem[] = filteredShifts.map(s => ({
+      type: 'shift',
+      id: s.id,
+      date: s.clockIn.timestamp,
+      shift: s
+    }));
+
+    const holidayItems: ShiftRecordItem[] = filteredHolidayRecords.map(h => {
+      let d = new Date();
+      try {
+        d = parseISO(h.date);
+      } catch (e) {
+        d = new Date();
+      }
+      return {
+        type: 'holiday',
+        id: h.id || `hol-${h.date}-${h.employeeId}`,
+        date: d,
+        holiday: h
+      };
+    });
+
+    let items: ShiftRecordItem[] = [];
+    if (shiftRecordTypeFilter === 'shifts') {
+      items = shiftItems;
+    } else if (shiftRecordTypeFilter === 'holidays') {
+      items = holidayItems;
+    } else {
+      items = [...shiftItems, ...holidayItems];
+    }
+
+    return items.sort((a, b) => b.date.getTime() - a.date.getTime());
+  }, [filteredShifts, filteredHolidayRecords, shiftRecordTypeFilter]);
+
+  const totalShiftPages = Math.max(1, Math.ceil(combinedRecordItems.length / shiftPageSize));
+
+  const paginatedRecordItems = useMemo(() => {
     const startIdx = (shiftPage - 1) * shiftPageSize;
-    return filteredShifts.slice(startIdx, startIdx + shiftPageSize);
-  }, [filteredShifts, shiftPage, shiftPageSize]);
+    return combinedRecordItems.slice(startIdx, startIdx + shiftPageSize);
+  }, [combinedRecordItems, shiftPage, shiftPageSize]);
+
+  const totalHolidayHoursInFilter = useMemo(() => {
+    return filteredHolidayRecords.reduce((sum, h) => sum + (h.hours || 0), 0);
+  }, [filteredHolidayRecords]);
+
+  const totalShiftHoursInFilter = useMemo(() => {
+    return filteredShifts.reduce((sum, s) => sum + (s.totalWorkedMinutes / 60), 0);
+  }, [filteredShifts]);
 
   const filteredPTORequests = useMemo(() => {
     return ptoRequests.filter(req => {
@@ -1680,10 +1865,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
                 <div>
                   <h1 className="text-3xl font-black text-slate-900 uppercase tracking-tighter">Shift Records</h1>
-                  <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-1">Audit log of all personnel activity</p>
-                  <div className="inline-flex items-center gap-2 mt-2 px-3 py-1 bg-slate-100 rounded-full text-[10px] font-bold text-slate-600">
-                    <span className="w-2 h-2 rounded-full bg-zrg-green animate-pulse" />
-                    Archive: {logs.length.toLocaleString()} punch records loaded ({formatDate(dateBounds.earliest)} – {formatDate(dateBounds.latest)})
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-[11px] mt-1">Audit log of all personnel activity & holiday hours</p>
+                  <div className="flex flex-wrap items-center gap-2 mt-2">
+                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-slate-100 rounded-full text-[10px] font-bold text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-zrg-green animate-pulse" />
+                      {filteredShifts.length} Work Shifts ({totalShiftHoursInFilter.toFixed(1)}h)
+                    </div>
+                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-50 border border-indigo-200/80 rounded-full text-[10px] font-bold text-indigo-900">
+                      <Sparkles size={12} className="text-indigo-600" />
+                      {filteredHolidayRecords.length} Holiday Entries ({totalHolidayHoursInFilter.toFixed(1)}h)
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -1775,203 +1966,381 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                   </div>
                 </div>
 
-                {/* Custom Date Range Inputs if "custom" selected */}
-                {shiftDatePreset === 'custom' && (
-                  <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
-                    <div className="flex items-center gap-2">
-                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">From:</label>
-                      <input 
-                        type="date"
-                        value={shiftStartDate}
-                        onChange={e => {
-                          setShiftStartDate(e.target.value);
+                {/* Record Type Filter & Custom Date Range */}
+                <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-slate-100">
+                  {/* Record Type Filter */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mr-1">View Type:</span>
+                    {[
+                      { id: 'all', label: `All Records (${filteredShifts.length + filteredHolidayRecords.length})` },
+                      { id: 'shifts', label: `Work Shifts (${filteredShifts.length})` },
+                      { id: 'holidays', label: `Holiday Hours (${filteredHolidayRecords.length})`, icon: Sparkles }
+                    ].map(typeTab => (
+                      <button
+                        key={typeTab.id}
+                        type="button"
+                        onClick={() => {
+                          setShiftRecordTypeFilter(typeTab.id as any);
                           setShiftPage(1);
                         }}
-                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">To:</label>
-                      <input 
-                        type="date"
-                        value={shiftEndDate}
-                        onChange={e => {
-                          setShiftEndDate(e.target.value);
-                          setShiftPage(1);
-                        }}
-                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
-                      />
-                    </div>
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer border flex items-center gap-1.5",
+                          shiftRecordTypeFilter === typeTab.id
+                            ? typeTab.id === 'holidays' 
+                              ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
+                              : "bg-zrg-navy text-white border-zrg-navy shadow-sm"
+                            : typeTab.id === 'holidays'
+                              ? "bg-indigo-50/70 text-indigo-800 border-indigo-200 hover:bg-indigo-100"
+                              : "bg-white text-slate-600 border-slate-200 hover:border-zrg-blue hover:text-zrg-blue"
+                        )}
+                      >
+                        {typeTab.icon && <typeTab.icon size={11} className={shiftRecordTypeFilter === typeTab.id ? "text-amber-300" : "text-indigo-600"} />}
+                        {typeTab.label}
+                      </button>
+                    ))}
                   </div>
-                )}
+
+                  {/* Custom Date Range Inputs if "custom" selected */}
+                  {shiftDatePreset === 'custom' && (
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2">
+                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">From:</label>
+                        <input 
+                          type="date"
+                          value={shiftStartDate}
+                          onChange={e => {
+                            setShiftStartDate(e.target.value);
+                            setShiftPage(1);
+                          }}
+                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">To:</label>
+                        <input 
+                          type="date"
+                          value={shiftEndDate}
+                          onChange={e => {
+                            setShiftEndDate(e.target.value);
+                            setShiftPage(1);
+                          }}
+                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-bold outline-none focus:border-zrg-blue"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                 <table className="w-full text-left">
                   <thead>
                     <tr className="bg-slate-50/50 border-b border-slate-100">
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee</th>
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Worked Time</th>
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Unpaid Breaks</th>
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Total Hours</th>
+                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee & Date</th>
+                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Activity / Details</th>
+                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Type / Breaks</th>
+                      <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Compensated Hours</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {paginatedShifts.length === 0 ? (
+                    {paginatedRecordItems.length === 0 ? (
                       <tr>
                         <td colSpan={4} className="px-8 py-16 text-center text-slate-400 font-bold text-xs uppercase tracking-widest">
-                          No shift records match your current filter criteria.
+                          No {shiftRecordTypeFilter === 'holidays' ? 'holiday' : shiftRecordTypeFilter === 'shifts' ? 'shift' : ''} records match your current filter criteria.
                         </td>
                       </tr>
                     ) : (
-                      paginatedShifts.map((shift) => (
-                      <React.Fragment key={shift.id}>
-                        <tr 
-                          onClick={() => setExpandedShiftId(expandedShiftId === shift.id ? null : shift.id)}
-                          className={cn(
-                            "hover:bg-zrg-lightblue/10 transition-colors cursor-pointer group",
-                            expandedShiftId === shift.id && "bg-zrg-lightblue/5"
-                          )}
-                        >
-                          <td className="px-8 py-4">
-                            <div className="flex items-center gap-4">
-                              <div className="p-2 bg-slate-50 rounded-lg text-slate-300 group-hover:text-zrg-blue transition-colors">
-                                <ChevronRight 
-                                  size={14} 
-                                  className={cn("transition-transform", expandedShiftId === shift.id && "rotate-90")} 
-                                />
-                              </div>
-                              <div>
-                                <div className="font-bold text-zrg-navy text-sm">{shift.employeeName}</div>
-                                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{formatDate(shift.clockIn.timestamp)}</div>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-8 py-4">
-                            <div className="text-slate-600 font-bold text-[11px] tabular-nums flex items-center gap-2">
-                              {formatTime(shift.clockIn.timestamp)}
-                              <span className="text-slate-300">—</span>
-                              {shift.clockOut ? formatTime(shift.clockOut.timestamp) : <span className="text-zrg-orange italic">MISSING CLOCK OUT</span>}
-                            </div>
-                          </td>
-                          <td className="px-8 py-4 text-center">
-                            <div className={cn(
-                              "text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full inline-block",
-                              shift.totalBreakMinutes > 0 ? "bg-zrg-teal/10 text-zrg-teal" : "bg-slate-50 text-slate-300"
-                            )}>
-                              {shift.totalBreakMinutes > 0 ? `${shift.totalBreakMinutes} min` : 'No Breaks'}
-                            </div>
-                          </td>
-                          <td className="px-8 py-4 text-right">
-                            {shift.clockOut ? (
-                              <div className="text-zrg-blue font-black text-sm tabular-nums">
-                                {(shift.totalWorkedMinutes / 60).toFixed(2)}
-                                <span className="text-[9px] ml-1">HRS</span>
-                              </div>
-                            ) : (
-                              <span className="text-slate-300 text-[10px] font-black uppercase tracking-widest">Incomplete</span>
-                            )}
-                          </td>
-                        </tr>
-                        {expandedShiftId === shift.id && (
-                          <tr className="bg-slate-50/50">
-                            <td colSpan={4} className="px-12 py-8">
-                              <div className="space-y-4">
-                                <div className="flex items-center justify-between mb-4">
-                                  <div className="flex flex-col">
-                                    <h4 className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Detailed Shift Activity</h4>
-                                    <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Modify individual events or the entire day</p>
+                      paginatedRecordItems.map((item) => {
+                        if (item.type === 'holiday') {
+                          const holiday = item.holiday;
+                          const isExpanded = expandedShiftId === item.id;
+                          return (
+                            <React.Fragment key={item.id}>
+                              <tr
+                                onClick={() => setExpandedShiftId(isExpanded ? null : item.id)}
+                                className={cn(
+                                  "bg-gradient-to-r from-indigo-50/50 to-indigo-50/20 hover:from-indigo-100/60 hover:to-indigo-50/40 border-l-4 border-l-indigo-600 transition-colors cursor-pointer group",
+                                  isExpanded && "from-indigo-100/70 to-indigo-50/60"
+                                )}
+                              >
+                                <td className="px-8 py-4">
+                                  <div className="flex items-center gap-4">
+                                    <div className="p-2 bg-indigo-100 rounded-lg text-indigo-700 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                                      <Sparkles size={14} />
+                                    </div>
+                                    <div>
+                                      <div className="font-bold text-indigo-950 text-sm flex items-center gap-2">
+                                        {holiday.employeeName}
+                                        <span className="inline-flex items-center gap-1 bg-indigo-100 text-indigo-900 border border-indigo-200 text-[9px] font-black uppercase px-2 py-0.5 rounded-full">
+                                          Paid Holiday
+                                        </span>
+                                      </div>
+                                      <div className="text-[10px] text-indigo-600 font-bold uppercase tracking-widest">
+                                        {formatDate(item.date)}
+                                      </div>
+                                    </div>
                                   </div>
-                                  <button 
-                                    onClick={() => {
-                                      setEditingShift(shift);
-                                      setIsManualShiftModalOpen(true);
-                                    }}
-                                    className="flex items-center gap-2 px-4 py-2 bg-zrg-blue text-white rounded-xl font-black uppercase text-[9px] tracking-widest shadow-lg shadow-zrg-blue/10"
-                                  >
-                                    <Edit2 size={12} />
-                                    Edit Full Day
-                                  </button>
-                                </div>
-                                <div className="grid grid-cols-1 gap-3">
-                                  {shift.allLogs.sort((a,b) => {
-                                    const timeDiff = a.timestamp.getTime() - b.timestamp.getTime();
-                                    if (timeDiff !== 0) return timeDiff;
-                                    const prioA = logTypePriority[a.type as LogType] || 0;
-                                    const prioB = logTypePriority[b.type as LogType] || 0;
-                                    return prioA - prioB;
-                                  }).map((log, idx) => (
-                                    <div 
-                                      key={`expanded-log-${log.id || idx}`}
-                                      className="bg-white border border-slate-100 p-4 rounded-xl flex items-center justify-between shadow-sm"
-                                    >
-                                      <div className="flex items-center gap-4">
-                                        <div className={cn(
-                                          "w-2 h-2 rounded-full",
-                                          log.type === LogType.CLOCK_IN ? "bg-zrg-green" :
-                                          log.type === LogType.CLOCK_OUT ? "bg-zrg-orange" : "bg-zrg-teal"
-                                        )} />
-                                        <div>
-                                          <div className="text-[10px] font-black uppercase tracking-widest text-zrg-navy">
-                                            {log.type.replace('_', ' ')}
-                                          </div>
-                                          <div className="text-[11px] font-bold text-slate-400 tabular-nums">
-                                            {formatTime(log.timestamp)}
-                                          </div>
+                                </td>
+                                <td className="px-8 py-4">
+                                  <div className="text-slate-700 font-bold text-[11px] flex flex-col">
+                                    <span className="font-black text-indigo-900 flex items-center gap-1">
+                                      <Sparkles size={12} className="text-amber-500" />
+                                      {holiday.holidayName}
+                                    </span>
+                                    {holiday.note && (
+                                      <span className="text-[10px] text-slate-400 italic">"{holiday.note}"</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="px-8 py-4 text-center">
+                                  <div className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full inline-block bg-indigo-100/70 text-indigo-800 border border-indigo-200/60">
+                                    Designated Holiday
+                                  </div>
+                                </td>
+                                <td className="px-8 py-4 text-right">
+                                  <div className="text-indigo-700 font-black text-sm tabular-nums flex items-center justify-end gap-1">
+                                    +{holiday.hours.toFixed(2)}
+                                    <span className="text-[9px] ml-0.5">HRS</span>
+                                  </div>
+                                </td>
+                              </tr>
+                              {isExpanded && (
+                                <tr className="bg-indigo-50/40">
+                                  <td colSpan={4} className="px-12 py-6">
+                                    <div className="bg-white p-5 rounded-2xl border border-indigo-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                      <div className="space-y-1">
+                                        <div className="flex items-center gap-2">
+                                          <h4 className="text-sm font-black text-indigo-950">{holiday.holidayName}</h4>
+                                          <span className="bg-indigo-100 text-indigo-800 font-black text-[9px] uppercase px-2 py-0.5 rounded">
+                                            {holiday.hours.toFixed(2)} Paid Holiday Hours
+                                          </span>
                                         </div>
+                                        <p className="text-xs text-slate-600 font-medium">
+                                          Beneficiary: <strong className="text-slate-900">{holiday.employeeName}</strong> &bull; Date: <strong className="text-slate-900">{formatDate(item.date)}</strong>
+                                        </p>
+                                        {holiday.note && (
+                                          <p className="text-xs text-slate-400 italic">
+                                            Note: "{holiday.note}"
+                                          </p>
+                                        )}
                                       </div>
                                       <div className="flex items-center gap-3">
-                                        {log.note && (
-                                          <span className="text-[10px] text-slate-300 italic max-w-xs truncate">"{log.note}"</span>
-                                        )}
-                                        <div onClick={(e) => { e.stopPropagation(); window.open(log.photoUrl); }} className="w-8 h-8 rounded-lg overflow-hidden border border-slate-100 cursor-pointer">
-                                          <img src={log.photoUrl} className="w-full h-full object-cover" />
-                                        </div>
-                                        <div className="flex gap-2">
-                                          <button 
-                                            onClick={(e) => { e.stopPropagation(); setEditingLog(log); }}
-                                            className="p-2 bg-slate-50 text-slate-300 hover:bg-zrg-blue hover:text-white rounded-lg transition-all"
-                                          >
-                                            <Edit2 size={12} />
-                                          </button>
-                                          <button 
+                                        {holiday.id && (
+                                          <button
+                                            type="button"
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              if (confirmingDeleteId === log.id) {
-                                                handleDeleteLog(log.id!);
+                                              if (confirmingDeleteHolidayId === holiday.id) {
+                                                handleDeleteHolidayRecord(holiday.id!);
+                                                setConfirmingDeleteHolidayId(null);
                                               } else {
-                                                setConfirmingDeleteId(log.id!);
-                                                setTimeout(() => setConfirmingDeleteId(null), 3000);
+                                                setConfirmingDeleteHolidayId(holiday.id!);
+                                                setTimeout(() => setConfirmingDeleteHolidayId(null), 3000);
                                               }
                                             }}
                                             className={cn(
-                                              "p-2 rounded-lg transition-all",
-                                              confirmingDeleteId === log.id 
-                                                ? "bg-zrg-orange text-white animate-pulse" 
-                                                : "bg-slate-50 text-slate-300 hover:bg-zrg-orange hover:text-white"
+                                              "flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer",
+                                              confirmingDeleteHolidayId === holiday.id
+                                                ? "bg-rose-600 text-white animate-pulse"
+                                                : "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100"
                                             )}
                                           >
-                                            <Trash2 size={12} />
+                                            <Trash2 size={13} />
+                                            {confirmingDeleteHolidayId === holiday.id ? "Confirm Delete?" : "Delete Holiday Hours"}
                                           </button>
-                                        </div>
+                                        )}
                                       </div>
                                     </div>
-                                  ))}
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        }
+
+                        // Otherwise it's a shift
+                        const shift = item.shift;
+                        const isExpanded = expandedShiftId === shift.id;
+                        return (
+                          <React.Fragment key={shift.id}>
+                            <tr 
+                              onClick={() => setExpandedShiftId(isExpanded ? null : shift.id)}
+                              className={cn(
+                                "hover:bg-zrg-lightblue/10 transition-colors cursor-pointer group",
+                                isExpanded && "bg-zrg-lightblue/5"
+                              )}
+                            >
+                              <td className="px-8 py-4">
+                                <div className="flex items-center gap-4">
+                                  <div className="p-2 bg-slate-50 rounded-lg text-slate-300 group-hover:text-zrg-blue transition-colors">
+                                    <ChevronRight 
+                                      size={14} 
+                                      className={cn("transition-transform", isExpanded && "rotate-90")} 
+                                    />
+                                  </div>
+                                  <div>
+                                    <div className="font-bold text-zrg-navy text-sm flex items-center gap-2">
+                                      {shift.employeeName}
+                                      {shift.isHoliday && (
+                                        <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-900 border border-amber-200 text-[9px] font-black uppercase px-2 py-0.5 rounded-md">
+                                          <Sparkles size={10} className="text-amber-600" />
+                                          Holiday Shift{shift.holidayName ? `: ${shift.holidayName}` : ''}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{formatDate(shift.clockIn.timestamp)}</div>
+                                  </div>
                                 </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    )))}
+                              </td>
+                              <td className="px-8 py-4">
+                                <div className="text-slate-600 font-bold text-[11px] tabular-nums flex items-center gap-2">
+                                  {formatTime(shift.clockIn.timestamp)}
+                                  <span className="text-slate-300">—</span>
+                                  {shift.clockOut ? formatTime(shift.clockOut.timestamp) : <span className="text-zrg-orange italic">MISSING CLOCK OUT</span>}
+                                </div>
+                              </td>
+                              <td className="px-8 py-4 text-center">
+                                <div className={cn(
+                                  "text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full inline-block",
+                                  shift.totalBreakMinutes > 0 ? "bg-zrg-teal/10 text-zrg-teal" : "bg-slate-50 text-slate-300"
+                                )}>
+                                  {shift.totalBreakMinutes > 0 ? `${shift.totalBreakMinutes} min` : 'No Breaks'}
+                                </div>
+                              </td>
+                              <td className="px-8 py-4 text-right">
+                                {shift.clockOut ? (
+                                  <div className="text-zrg-blue font-black text-sm tabular-nums">
+                                    {(shift.totalWorkedMinutes / 60).toFixed(2)}
+                                    <span className="text-[9px] ml-1">HRS</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-300 text-[10px] font-black uppercase tracking-widest">Incomplete</span>
+                                )}
+                              </td>
+                            </tr>
+                            {isExpanded && (
+                              <tr className="bg-slate-50/50">
+                                <td colSpan={4} className="px-12 py-8">
+                                  <div className="space-y-4">
+                                    <div className="flex items-center justify-between mb-4">
+                                      <div className="flex flex-col">
+                                        <h4 className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Detailed Shift Activity</h4>
+                                        <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Modify individual events or the entire day</p>
+                                      </div>
+                                      <button 
+                                        onClick={() => {
+                                          setEditingShift(shift);
+                                          setIsManualShiftModalOpen(true);
+                                        }}
+                                        className="flex items-center gap-2 px-4 py-2 bg-zrg-blue text-white rounded-xl font-black uppercase text-[9px] tracking-widest shadow-lg shadow-zrg-blue/10 cursor-pointer"
+                                      >
+                                        <Edit2 size={12} />
+                                        Edit Full Day
+                                      </button>
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-3">
+                                      {shift.allLogs.sort((a,b) => {
+                                        const timeDiff = a.timestamp.getTime() - b.timestamp.getTime();
+                                        if (timeDiff !== 0) return timeDiff;
+                                        const prioA = logTypePriority[a.type as LogType] || 0;
+                                        const prioB = logTypePriority[b.type as LogType] || 0;
+                                        return prioA - prioB;
+                                      }).map((log, idx) => (
+                                        <div 
+                                          key={`expanded-log-${log.id || idx}`}
+                                          className="bg-white border border-slate-100 p-4 rounded-xl flex items-center justify-between shadow-sm"
+                                        >
+                                          <div className="flex items-center gap-4">
+                                            <div className={cn(
+                                              "w-2 h-2 rounded-full",
+                                              log.type === LogType.CLOCK_IN ? "bg-zrg-green" :
+                                              log.type === LogType.CLOCK_OUT ? "bg-zrg-orange" : "bg-zrg-teal"
+                                            )} />
+                                            <div>
+                                              <div className="text-[10px] font-black uppercase tracking-widest text-zrg-navy">
+                                                {log.type.replace('_', ' ')}
+                                              </div>
+                                              <div className="text-[11px] font-bold text-slate-400 tabular-nums">
+                                                {formatTime(log.timestamp)}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          <div className="flex items-center gap-3">
+                                            {log.note && (
+                                              <span className="text-[10px] text-slate-300 italic max-w-xs truncate">"{log.note}"</span>
+                                            )}
+                                            {log.photoUrl && log.photoUrl.trim() !== '' ? (
+                                              <button 
+                                                type="button"
+                                                onClick={(e) => { 
+                                                  e.stopPropagation(); 
+                                                  setViewingPhotoUrl(log.photoUrl); 
+                                                }} 
+                                                title="View Verification Photo"
+                                                className="w-8 h-8 rounded-lg overflow-hidden border border-slate-200 cursor-pointer hover:border-zrg-blue transition-all bg-slate-100 shrink-0"
+                                              >
+                                                <img 
+                                                  src={log.photoUrl} 
+                                                  alt="Verification Photo" 
+                                                  referrerPolicy="no-referrer"
+                                                  className="w-full h-full object-cover" 
+                                                />
+                                              </button>
+                                            ) : (
+                                              <div 
+                                                title="Manual entry (no photo)"
+                                                className="w-8 h-8 rounded-lg border border-slate-200/60 bg-slate-50 flex items-center justify-center text-slate-300 shrink-0"
+                                              >
+                                                <Camera size={13} className="opacity-40" />
+                                              </div>
+                                            )}
+                                            <div className="flex gap-2">
+                                              <button 
+                                                onClick={(e) => { e.stopPropagation(); setEditingLog(log); }}
+                                                className="p-2 bg-slate-50 text-slate-300 hover:bg-zrg-blue hover:text-white rounded-lg transition-all"
+                                              >
+                                                <Edit2 size={12} />
+                                              </button>
+                                              <button 
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  if (confirmingDeleteId === log.id) {
+                                                    handleDeleteLog(log.id!);
+                                                  } else {
+                                                    setConfirmingDeleteId(log.id!);
+                                                    setTimeout(() => setConfirmingDeleteId(null), 3000);
+                                                  }
+                                                }}
+                                                className={cn(
+                                                  "p-2 rounded-lg transition-all",
+                                                  confirmingDeleteId === log.id 
+                                                    ? "bg-zrg-orange text-white animate-pulse" 
+                                                    : "bg-slate-50 text-slate-300 hover:bg-zrg-orange hover:text-white"
+                                                )}
+                                              >
+                                                <Trash2 size={12} />
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
 
                 {/* Pagination Controls */}
-                {filteredShifts.length > 0 && (
+                {combinedRecordItems.length > 0 && (
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-8 py-4 bg-slate-50/50 border-t border-slate-100">
                     <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                      Showing <span className="text-zrg-navy font-black">{(shiftPage - 1) * shiftPageSize + 1}</span>–<span className="text-zrg-navy font-black">{Math.min(shiftPage * shiftPageSize, filteredShifts.length)}</span> of <span className="text-zrg-navy font-black">{filteredShifts.length}</span> shifts ({summarizedShifts.length} total)
+                      Showing <span className="text-zrg-navy font-black">{(shiftPage - 1) * shiftPageSize + 1}</span>–<span className="text-zrg-navy font-black">{Math.min(shiftPage * shiftPageSize, combinedRecordItems.length)}</span> of <span className="text-zrg-navy font-black">{combinedRecordItems.length}</span> records ({filteredShifts.length} shifts, {filteredHolidayRecords.length} holiday entries)
                     </div>
                     <div className="flex items-center gap-2">
                       <button
@@ -2667,7 +3036,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
         )}
         {isManualShiftModalOpen && (
           <ManualShiftModal
-            key="manual-shift-modal"
+            key={editingShift ? `manual-shift-edit-${editingShift.id}` : 'manual-shift-new'}
             isOpen={isManualShiftModalOpen}
             onClose={() => {
               setIsManualShiftModalOpen(false);
@@ -2793,6 +3162,50 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                       <span>Confirm & Notify Employee</span>
                     </>
                   )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {viewingPhotoUrl && (
+          <div 
+            onClick={() => setViewingPhotoUrl(null)}
+            className="fixed inset-0 z-[130] bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 cursor-pointer"
+          >
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-3xl overflow-hidden shadow-2xl max-w-md w-full border border-slate-100 cursor-default"
+            >
+              <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Camera size={16} className="text-zrg-blue" />
+                  <span className="text-xs font-black uppercase tracking-wider text-zrg-navy">Punch Verification Photo</span>
+                </div>
+                <button 
+                  onClick={() => setViewingPhotoUrl(null)} 
+                  className="p-1.5 hover:bg-slate-100 rounded-xl text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="p-4 bg-slate-900 flex items-center justify-center min-h-[260px]">
+                <img 
+                  src={viewingPhotoUrl} 
+                  alt="Verification Capture"
+                  referrerPolicy="no-referrer"
+                  className="max-h-[70vh] w-auto max-w-full rounded-xl object-contain shadow-md" 
+                />
+              </div>
+              <div className="p-4 bg-slate-50 text-center">
+                <button 
+                  onClick={() => setViewingPhotoUrl(null)}
+                  className="w-full py-2.5 bg-zrg-navy text-white rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-opacity-90 transition-all cursor-pointer"
+                >
+                  Close Preview
                 </button>
               </div>
             </motion.div>
