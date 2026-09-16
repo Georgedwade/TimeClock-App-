@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Calendar, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Calendar, X, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
 import { Employee } from '../types';
 import { supabaseService } from '../services/supabaseService';
 import { notificationService } from '../services/notificationService';
+import { isPTODatePassed } from '../utils/ptoUtils';
 import { cn } from '../lib/utils';
 
 interface PTORequestModalProps {
@@ -20,8 +21,28 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
   const [note, setNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scheduledHours, setScheduledHours] = useState<number>(0);
+
+  useEffect(() => {
+    if (employee && isOpen) {
+      supabaseService.getPTORequests().then(requests => {
+        const upcoming = requests.filter(r => 
+          r.employeeId === employee.id && 
+          r.status === 'approved' && 
+          !isPTODatePassed(r.endDate, r.startDate)
+        );
+        const total = upcoming.reduce((sum, r) => sum + (Number(r.hoursRequested) || 0), 0);
+        setScheduledHours(total);
+      }).catch(err => {
+        console.error('Failed to load employee PTO requests:', err);
+      });
+    }
+  }, [employee, isOpen]);
 
   if (!isOpen || !employee) return null;
+
+  const currentBalance = employee.ptoBalance || 0;
+  const availableBalance = Math.max(0, currentBalance - scheduledHours);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,8 +58,8 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
       return;
     }
 
-    if (hours > (employee.ptoBalance || 0)) {
-      setError(`Insufficient balance. You only have ${(employee.ptoBalance || 0).toFixed(2)} hours available.`);
+    if (hours > availableBalance) {
+      setError(`Insufficient available balance. You have ${availableBalance.toFixed(2)} hours available (${currentBalance.toFixed(2)} balance minus ${scheduledHours.toFixed(2)} already scheduled).`);
       return;
     }
 
@@ -87,7 +108,14 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
             </div>
             <div>
               <h2 className="text-xl font-black text-zrg-navy uppercase tracking-tight">Request PTO</h2>
-              <p className="text-[10px] text-zrg-blue font-bold uppercase tracking-widest mt-1">Available: {(employee.ptoBalance || 0).toFixed(2)} Hrs</p>
+              <div className="text-[10px] text-zrg-blue font-bold uppercase tracking-wider mt-1">
+                Balance: {currentBalance.toFixed(2)} Hrs
+                {scheduledHours > 0 && (
+                  <span className="text-amber-600 ml-1">
+                    ({scheduledHours.toFixed(2)} scheduled • {availableBalance.toFixed(2)} available)
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-white rounded-xl transition-colors text-slate-300">
@@ -98,8 +126,8 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
         <form onSubmit={handleSubmit} className="p-8 space-y-6">
           {error && (
             <div className="p-4 bg-zrg-orange/10 border border-zrg-orange/20 rounded-xl flex items-center gap-3 text-zrg-orange text-xs font-bold uppercase">
-              <AlertTriangle size={18} />
-              {error}
+              <AlertTriangle size={18} className="shrink-0" />
+              <span>{error}</span>
             </div>
           )}
 
@@ -131,9 +159,9 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
               <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Hours to Apply</label>
               <span className={cn(
                 "text-[10px] font-black uppercase tracking-widest",
-                hours > (employee.ptoBalance || 0) ? "text-zrg-orange" : "text-zrg-green"
+                hours > availableBalance ? "text-zrg-orange" : "text-zrg-green"
               )}>
-                {hours > (employee.ptoBalance || 0) ? 'Balance Exceeded' : 'Balance OK'}
+                {hours > availableBalance ? 'Balance Exceeded' : 'Balance OK'}
               </span>
             </div>
             <input 
@@ -152,14 +180,21 @@ export const PTORequestModal: React.FC<PTORequestModalProps> = ({ isOpen, onClos
             <textarea 
               value={note}
               onChange={e => setNote(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 font-bold text-sm outline-none focus:border-zrg-blue transition-all min-h-[100px] resize-none"
+              className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 font-bold text-sm outline-none focus:border-zrg-blue transition-all min-h-[80px] resize-none"
               placeholder="e.g. Family vacation, medical appointment..."
             />
           </div>
 
+          <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl flex items-start gap-2.5 text-slate-500">
+            <Info size={14} className="text-zrg-blue shrink-0 mt-0.5" />
+            <p className="text-[11px] leading-relaxed">
+              <strong className="text-slate-700">Deduction Schedule:</strong> Approved PTO hours remain in your balance until after the date the time off is taken.
+            </p>
+          </div>
+
           <button 
             type="submit"
-            disabled={isSubmitting || hours > (employee.ptoBalance || 0)}
+            disabled={isSubmitting || hours > availableBalance}
             className="w-full bg-zrg-blue text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-zrg-blue/20 disabled:bg-slate-200 disabled:shadow-none transition-all flex items-center justify-center gap-2"
           >
             {isSubmitting ? 'Submitting...' : 'Submit Request'}

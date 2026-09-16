@@ -56,5 +56,9 @@ service cloud.firestore {
     match /settings/{docId} {
       allow read, write: if true;
     }
+
+    match /test/{docId} {
+      allow read: if true;
+    }
   }
 }

@@ -348,7 +348,7 @@ export const KioskView: React.FC<KioskViewProps> = ({ onManagerAccess }) => {
       <main className="flex-1 flex overflow-hidden">
         {/* Left Section: Kiosk View */}
         <section className="w-2/3 p-4 sm:p-6 md:p-8 flex flex-col items-center justify-center border-r border-slate-100 bg-white relative overflow-y-auto">
-          <AnimatePresence mode="wait">
+          <AnimatePresence initial={false}>
             {!selectedEmployee ? (
               <motion.div 
                 key="pin-entry"

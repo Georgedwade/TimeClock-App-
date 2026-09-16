@@ -36,6 +36,7 @@ import { cn, formatDate, formatTime } from '../lib/utils';
 import Papa from 'papaparse';
 import { AddHolidayModal } from './AddHolidayModal';
 import { supabaseService } from '../services/supabaseService';
+import { parseDateOnly } from '../utils/ptoUtils';
 
 const logTypePriority: Record<LogType, number> = {
   [LogType.CLOCK_IN]: 1,
@@ -404,14 +405,12 @@ export const ReportView: React.FC<ReportViewProps> = ({
   }, [shifts, startDate, endDate, selectedEmployee]);
 
   const relevantPTO = useMemo(() => {
-    const start = startOfDay(parseISO(startDate));
-    const end = endOfDay(parseISO(endDate));
-
     return ptoRequests.filter(req => {
       if (req.status !== 'approved') return false;
       try {
-        const reqDate = parseISO(req.startDate);
-        const isInRange = isWithinInterval(reqDate, { start, end });
+        const startStr = (req.startDate || '').slice(0, 10);
+        const endStr = (req.endDate || req.startDate || '').slice(0, 10);
+        const isInRange = endStr >= startDate && startStr <= endDate;
         const isCorrectEmployee = selectedEmployee === 'all' || req.employeeId === selectedEmployee;
         return isInRange && isCorrectEmployee;
       } catch (e) {
@@ -422,13 +421,10 @@ export const ReportView: React.FC<ReportViewProps> = ({
 
   // Filter holiday records by date range and selected employee
   const relevantHolidayRecords = useMemo(() => {
-    const start = startOfDay(parseISO(startDate));
-    const end = endOfDay(parseISO(endDate));
-
     return (allHolidayRecords || []).filter(h => {
       try {
-        const holDate = parseISO(h.date);
-        const inRange = isWithinInterval(holDate, { start, end });
+        const hDateStr = (h.date || '').slice(0, 10);
+        const inRange = hDateStr >= startDate && hDateStr <= endDate;
         const matchesEmp = selectedEmployee === 'all' || h.employeeId === selectedEmployee || h.employeeId === 'ALL';
         return inRange && matchesEmp;
       } catch (e) {
@@ -530,12 +526,12 @@ export const ReportView: React.FC<ReportViewProps> = ({
         })),
         ...empHolidays.map(h => ({
           type: 'holiday' as const,
-          date: parseISO(h.date),
+          date: parseDateOnly(h.date),
           holiday: h
         })),
         ...empPTO.map(p => ({
           type: 'pto' as const,
-          date: parseISO(p.startDate),
+          date: parseDateOnly(p.startDate),
           pto: p
         }))
       ].sort((a, b) => a.date.getTime() - b.date.getTime());
@@ -980,13 +976,13 @@ export const ReportView: React.FC<ReportViewProps> = ({
               ...empHolidays.map(h => ({
                 id: `holiday-${h.id || h.date}`,
                 type: 'holiday' as const,
-                date: parseISO(h.date),
+                date: parseDateOnly(h.date),
                 holiday: h
               })),
               ...empPTO.map(p => ({
                 id: `pto-${p.id || p.startDate}`,
                 type: 'pto' as const,
-                date: parseISO(p.startDate),
+                date: parseDateOnly(p.startDate),
                 pto: p
               }))
             ].sort((a, b) => a.date.getTime() - b.date.getTime());
@@ -1131,7 +1127,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
                                             </div>
                                             <div>
                                               <div className="flex items-center gap-2">
-                                                <p className="text-[11px] font-black text-indigo-950">{format(parseISO(hol.date), 'MMM dd, yyyy')}</p>
+                                                <p className="text-[11px] font-black text-indigo-950">{format(parseDateOnly(hol.date), 'MMM dd, yyyy')}</p>
                                                 <span className="bg-indigo-200/60 text-indigo-900 text-[8px] font-black uppercase px-1.5 py-0.5 rounded">
                                                   Holiday Pay
                                                 </span>
@@ -1175,7 +1171,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
                                      return (
                                        <div key={item.id} className="flex items-center justify-between p-3 bg-zrg-teal/5 rounded-xl border border-zrg-teal/10">
                                           <div>
-                                            <p className="text-[11px] font-black text-zrg-teal">{format(parseISO(pto.startDate), 'MMM dd, yyyy')}</p>
+                                            <p className="text-[11px] font-black text-zrg-teal">{format(parseDateOnly(pto.startDate), 'MMM dd, yyyy')}</p>
                                             <p className="text-[9px] text-zrg-teal/60 font-bold uppercase tracking-widest">
                                               PTO Record {pto.managerNote ? `• ${pto.managerNote}` : ''}
                                             </p>

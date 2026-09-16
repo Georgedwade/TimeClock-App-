@@ -33,6 +33,7 @@ import { RegisterEmployeeModal } from './RegisterEmployeeModal';
 import { ReportView } from './ReportView';
 import { AddHolidayModal } from './AddHolidayModal';
 import { cn, formatDate, formatTime } from '../lib/utils';
+import { isPTODatePassed, formatPTODateRange, parseDateOnly } from '../utils/ptoUtils';
 import { 
   differenceInMinutes, 
   subDays, 
@@ -633,9 +634,17 @@ interface EditEmployeeModalProps {
   employee: Employee | null;
   onSave: (data: Partial<Employee>) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  upcomingPTOHours?: number;
 }
 
-const EditEmployeeModal: React.FC<EditEmployeeModalProps> = ({ isOpen, onClose, employee, onSave, onDelete }) => {
+const EditEmployeeModal: React.FC<EditEmployeeModalProps> = ({ 
+  isOpen, 
+  onClose, 
+  employee, 
+  onSave, 
+  onDelete,
+  upcomingPTOHours = 0
+}) => {
   const [formData, setFormData] = useState<Partial<Employee>>({});
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
@@ -714,6 +723,11 @@ const EditEmployeeModal: React.FC<EditEmployeeModalProps> = ({ isOpen, onClose, 
                 onChange={e => setFormData({ ...formData, ptoBalance: parseFloat(e.target.value) })}
                 className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 font-bold text-sm outline-none focus:border-zrg-blue transition-all tabular-nums"
               />
+              {upcomingPTOHours > 0 && (
+                <p className="text-[9px] text-amber-700 font-bold mt-1.5 leading-tight bg-amber-50 p-2 rounded-lg border border-amber-200/80">
+                  ℹ️ {upcomingPTOHours.toFixed(1)} hrs scheduled for future leave. Will automatically deduct after the date taken.
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -758,6 +772,146 @@ const EditEmployeeModal: React.FC<EditEmployeeModalProps> = ({ isOpen, onClose, 
   );
 };
 
+interface AdjustPTOModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  target: {
+    employee: Employee;
+    upcomingHours: number;
+    upcomingDatesStr: string;
+  } | null;
+  amount: string;
+  onAmountChange: (val: string) => void;
+  onConfirm: () => Promise<void>;
+  isSubmitting: boolean;
+}
+
+const AdjustPTOModal: React.FC<AdjustPTOModalProps> = ({
+  isOpen,
+  onClose,
+  target,
+  amount,
+  onAmountChange,
+  onConfirm,
+  isSubmitting
+}) => {
+  if (!isOpen || !target) return null;
+
+  const currentBal = target.employee.ptoBalance || 0;
+  const parsedAmt = parseFloat(amount) || 0;
+  const newBal = currentBal + parsedAmt;
+  const projectedAfterUpcoming = newBal - target.upcomingHours;
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        className="bg-white rounded-[2rem] w-full max-w-md overflow-hidden shadow-2xl relative border border-slate-100"
+      >
+        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+          <div>
+            <h3 className="text-lg font-black text-zrg-navy uppercase tracking-tight">Adjust PTO Hours</h3>
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">{target.employee.name}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-xl transition-colors text-slate-400">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="grid grid-cols-2 gap-3 p-4 bg-slate-50 rounded-xl border border-slate-100">
+            <div>
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">Current Balance</p>
+              <p className="text-lg font-black text-zrg-navy tabular-nums">{currentBal.toFixed(2)} <span className="text-[10px] text-slate-400 font-bold">HRS</span></p>
+            </div>
+            <div>
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">After Adjustment</p>
+              <p className={cn("text-lg font-black tabular-nums", newBal < 0 ? "text-rose-600" : "text-emerald-600")}>
+                {newBal.toFixed(2)} <span className="text-[10px] text-slate-400 font-bold">HRS</span>
+              </p>
+            </div>
+          </div>
+
+          {target.upcomingHours > 0 && (
+            <div className="p-4 bg-amber-50/70 border border-amber-200/80 rounded-xl text-amber-900 space-y-1">
+              <div className="flex items-center gap-1.5 font-bold text-xs">
+                <Calendar size={13} className="text-amber-600 shrink-0" />
+                <span>Upcoming Approved PTO: {target.upcomingHours.toFixed(1)} hrs</span>
+              </div>
+              <p className="text-[11px] text-amber-700/90 leading-relaxed">
+                Dates: <span className="font-semibold">{target.upcomingDatesStr}</span>. Hours will automatically deduct from balance <span className="font-semibold underline">after</span> the date taken.
+              </p>
+              <p className="text-[10px] text-amber-800 font-bold pt-1 border-t border-amber-200/60">
+                Projected balance after upcoming leave: <span className="underline">{projectedAfterUpcoming.toFixed(2)} hrs</span>
+              </p>
+            </div>
+          )}
+
+          <div>
+            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1.5">
+              Hours to Add / Deduct
+            </label>
+            <div className="relative">
+              <input
+                type="number"
+                step="any"
+                value={amount}
+                onChange={e => onAmountChange(e.target.value)}
+                placeholder="e.g. 8 (or -8 to deduct)"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold text-base outline-none focus:border-zrg-blue transition-all tabular-nums"
+                autoFocus
+              />
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">HRS</span>
+            </div>
+            <div className="flex gap-2 mt-2">
+              {[8, 16, 24, 40].map(hrs => (
+                <button
+                  key={hrs}
+                  type="button"
+                  onClick={() => onAmountChange(String(hrs))}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded-lg text-[10px] font-bold text-slate-700 transition-colors"
+                >
+                  +{hrs}h
+                </button>
+              ))}
+              {[-8].map(hrs => (
+                <button
+                  key={hrs}
+                  type="button"
+                  onClick={() => onAmountChange(String(hrs))}
+                  className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 rounded-lg text-[10px] font-bold text-rose-700 transition-colors"
+                >
+                  {hrs}h
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 py-3 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={isSubmitting || !parsedAmt}
+            onClick={onConfirm}
+            className="flex-1 py-3 bg-zrg-blue hover:bg-opacity-90 disabled:opacity-50 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow-lg shadow-zrg-blue/20 transition-all cursor-pointer disabled:cursor-not-allowed"
+          >
+            {isSubmitting ? 'Saving...' : 'Apply Update'}
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 interface DashboardViewProps {
   onBack: () => void;
 }
@@ -781,6 +935,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   const [expandedShiftId, setExpandedShiftId] = useState<string | null>(null);
   const [requirePhotoVerification, setRequirePhotoVerification] = useState(true);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+
+  // Dedicated PTO Adjustment Modal State
+  const [ptoAdjustmentTarget, setPtoAdjustmentTarget] = useState<{
+    employee: Employee;
+    upcomingHours: number;
+    upcomingDatesStr: string;
+  } | null>(null);
+  const [ptoAdjustInput, setPtoAdjustInput] = useState<string>('8');
+  const [isSubmittingPTOAdjust, setIsSubmittingPTOAdjust] = useState<boolean>(false);
 
   // Shift Records Filter & Pagination State
   const [shiftEmployeeFilter, setShiftEmployeeFilter] = useState('ALL');
@@ -969,9 +1132,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
   };
 
   useEffect(() => {
+    // Check and process any due PTO deductions whose date has passed
+    supabaseService.processDuePTODeductions().catch(console.error);
+
     const unsubLogs = supabaseService.subscribeToLogs(setLogs);
     const unsubEmployees = supabaseService.subscribeToEmployees(setEmployees);
-    const unsubPTO = supabaseService.subscribeToPTORequests(setPtoRequests);
+    const unsubPTO = supabaseService.subscribeToPTORequests((reqs) => {
+      setPtoRequests(reqs);
+      supabaseService.processDuePTODeductions().catch(console.error);
+    });
     const unsubHoliday = supabaseService.subscribeToHolidayRecords(setHolidayRecords);
     const unsubSettings = supabaseService.subscribeToSettings((s) => {
       setRequirePhotoVerification(s.requirePhotoVerification);
@@ -1020,11 +1189,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       const finalStatus = isApprove ? 'approved' : 'rejected';
       const finalNote = ptoDecisionNote.trim() || (isApprove ? 'Approved' : 'Request denied');
 
-      // 1. Update status in database
-      await supabaseService.updatePTORequestStatus(request.id, finalStatus, finalNote);
+      // Check if the date of PTO has already passed (strictly after the date the PTO was taken)
+      const isDatePassed = isPTODatePassed(request.endDate, request.startDate);
+      const willDeduct = isApprove && isDatePassed;
 
-      // 2. Subtract from employee balance if approved
-      if (isApprove) {
+      // 1. Update status and deduction tracking in database
+      await supabaseService.updatePTORequestStatus(
+        request.id, 
+        finalStatus, 
+        finalNote,
+        willDeduct,
+        willDeduct ? new Date().toISOString() : undefined
+      );
+
+      // 2. Subtract from employee balance ONLY if approved AND the PTO date has already passed.
+      // If for a future date, the balance remains intact until after the PTO is taken!
+      if (willDeduct) {
         await supabaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
       }
 
@@ -1036,7 +1216,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       }
 
       // 4. Send email notification
-      const updatedReq = { ...request, status: finalStatus as any, managerNote: finalNote };
+      const updatedReq = { 
+        ...request, 
+        status: finalStatus as any, 
+        managerNote: finalNote,
+        isDeducted: willDeduct 
+      };
       const dispatchResult = await notificationService.notifyEmployeeOfPTOStatus(
         updatedReq, 
         employee || {
@@ -1049,8 +1234,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
       );
 
       // 5. Toast feedback
+      const decisionNote = isApprove 
+        ? (willDeduct 
+            ? 'Approved & deducted from balance.' 
+            : `Approved! Deduction of ${request.hoursRequested} hrs will occur after ${request.endDate || request.startDate}.`)
+        : 'Denied.';
+
       setToastNotification({
-        message: `PTO Request ${isApprove ? 'Approved' : 'Denied'}! Email dispatched to ${dispatchResult.recipient}.`,
+        message: `PTO Request ${decisionNote} Email dispatched to ${dispatchResult.recipient}.`,
         mailtoUrl: dispatchResult.mailtoUrl,
         recipient: dispatchResult.recipient
       });
@@ -1076,21 +1267,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     }
   };
 
-  const handleUpdatePTO = async (employeeId: string, employeeName: string) => {
-    const amountStr = prompt(`Add PTO hours for ${employeeName}:`, '8');
-    if (!amountStr) return;
-    
-    const amount = parseFloat(amountStr);
-    if (isNaN(amount)) {
-      alert('Please enter a valid number');
+  const openAdjustPTOModal = (emp: Employee) => {
+    const upcoming = ptoRequests.filter(r => 
+      r.employeeId === emp.id && 
+      r.status === 'approved' && 
+      !isPTODatePassed(r.endDate, r.startDate)
+    );
+    const totalUpcoming = upcoming.reduce((sum, r) => sum + (Number(r.hoursRequested) || 0), 0);
+    const datesStr = upcoming.map(r => formatPTODateRange(r.startDate, r.endDate)).join(', ');
+
+    setPtoAdjustmentTarget({
+      employee: emp,
+      upcomingHours: totalUpcoming,
+      upcomingDatesStr: datesStr
+    });
+    setPtoAdjustInput('8');
+  };
+
+  const handleSavePTOAdjustment = async () => {
+    if (!ptoAdjustmentTarget) return;
+    const amount = parseFloat(ptoAdjustInput);
+    if (isNaN(amount) || amount === 0) {
+      alert('Please enter a valid numeric amount of hours (positive to add, negative to deduct).');
       return;
     }
 
+    setIsSubmittingPTOAdjust(true);
     try {
-      await supabaseService.updateEmployeePTO(employeeId, amount);
+      await supabaseService.updateEmployeePTO(ptoAdjustmentTarget.employee.id, amount);
+      const newBal = (ptoAdjustmentTarget.employee.ptoBalance || 0) + amount;
+      setToastNotification({
+        message: `PTO balance for ${ptoAdjustmentTarget.employee.name} updated to ${newBal.toFixed(2)} hrs.`,
+        recipient: ptoAdjustmentTarget.employee.name
+      });
+      setPtoAdjustmentTarget(null);
     } catch (err) {
       console.error('Update failed:', err);
       alert('Failed to update PTO balance');
+    } finally {
+      setIsSubmittingPTOAdjust(false);
     }
   };
 
@@ -1172,6 +1387,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleDeletePTO = async (id: string) => {
     try {
+      const reqToDelete = ptoRequests.find(r => r.id === id);
+      if (reqToDelete && reqToDelete.status === 'approved' && reqToDelete.isDeducted) {
+        // Refund hours if they were already deducted
+        await supabaseService.updateEmployeePTO(reqToDelete.employeeId, reqToDelete.hoursRequested);
+      }
       await supabaseService.deletePTORequest(id);
       setConfirmingDeleteId(null);
     } catch (err) {
@@ -1182,9 +1402,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
 
   const handleAddManualPTO = async (request: Omit<PTORequest, 'id'>) => {
     try {
-      await supabaseService.addPTORequest(request);
-      if (request.status === 'approved') {
-        // If it's already approved, subtract hours immediately
+      const isDatePassed = isPTODatePassed(request.endDate, request.startDate);
+      const willDeduct = request.status === 'approved' && isDatePassed;
+
+      await supabaseService.addPTORequest({
+        ...request,
+        isDeducted: willDeduct,
+        deductedAt: willDeduct ? new Date().toISOString() : undefined,
+      });
+
+      if (willDeduct) {
+        // Only subtract immediately if the date of PTO has already passed
         await supabaseService.updateEmployeePTO(request.employeeId, -request.hoursRequested);
       }
 
@@ -1200,8 +1428,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
         await notificationService.notifyEmployeeOfPTOStatus(request, employee);
       }
 
+      const scheduleMsg = request.status === 'approved' && !willDeduct
+        ? ` (Deduction of ${request.hoursRequested} hrs will occur after ${request.endDate || request.startDate})`
+        : '';
+
       setToastNotification({
-        message: `PTO Record created. Notification email sent to dylan@zrgmedical.com.`,
+        message: `PTO Record created${scheduleMsg}. Notification email sent to dylan@zrgmedical.com.`,
         mailtoUrl: managerResults[0]?.mailtoUrl,
         recipient: 'dylan@zrgmedical.com'
       });
@@ -1580,26 +1812,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
           return false;
         }
       }
-      // 3. Date presets / range
+      // 3. Date presets / range (using string comparison to avoid UTC timezone offsets)
       try {
-        const holDate = parseISO(h.date);
+        const hDateStr = (h.date || '').slice(0, 10);
         if (shiftDatePreset === 'this_month') {
-          const start = startOfMonth(new Date());
-          const end = endOfMonth(new Date());
-          return isWithinInterval(holDate, { start, end });
+          const startStr = format(startOfMonth(new Date()), 'yyyy-MM-dd');
+          const endStr = format(endOfMonth(new Date()), 'yyyy-MM-dd');
+          return hDateStr >= startStr && hDateStr <= endStr;
         } else if (shiftDatePreset === 'last_month') {
           const prevMonth = subMonths(new Date(), 1);
-          const start = startOfMonth(prevMonth);
-          const end = endOfMonth(prevMonth);
-          return isWithinInterval(holDate, { start, end });
+          const startStr = format(startOfMonth(prevMonth), 'yyyy-MM-dd');
+          const endStr = format(endOfMonth(prevMonth), 'yyyy-MM-dd');
+          return hDateStr >= startStr && hDateStr <= endStr;
         } else if (shiftDatePreset === 'last_30') {
-          const start = subDays(new Date(), 30);
-          const end = endOfDay(new Date());
-          return isWithinInterval(holDate, { start, end });
+          const startStr = format(subDays(new Date(), 30), 'yyyy-MM-dd');
+          const endStr = format(new Date(), 'yyyy-MM-dd');
+          return hDateStr >= startStr && hDateStr <= endStr;
         } else if (shiftDatePreset === 'custom' && shiftStartDate && shiftEndDate) {
-          const start = startOfDay(parseISO(shiftStartDate));
-          const end = endOfDay(parseISO(shiftEndDate));
-          return isWithinInterval(holDate, { start, end });
+          return hDateStr >= shiftStartDate && hDateStr <= shiftEndDate;
         }
       } catch (e) {
         return true;
@@ -1621,9 +1851,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
     }));
 
     const holidayItems: ShiftRecordItem[] = filteredHolidayRecords.map(h => {
-      let d = new Date();
+      let d: Date;
       try {
-        d = parseISO(h.date);
+        d = parseDateOnly(h.date);
       } catch (e) {
         d = new Date();
       }
@@ -2599,14 +2829,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                               </td>
 
                               <td className="px-6 py-4 text-center">
-                                <span className={cn(
-                                  "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border",
-                                  req.status === 'pending' ? "bg-amber-50 text-amber-600 border-amber-200" :
-                                  req.status === 'approved' ? "bg-emerald-50 text-emerald-600 border-emerald-200" :
-                                  "bg-rose-50 text-rose-600 border-rose-200"
-                                )}>
-                                  {req.status}
-                                </span>
+                                {(() => {
+                                  if (req.status === 'pending') {
+                                    return (
+                                      <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border bg-amber-50 text-amber-600 border-amber-200">
+                                        Pending
+                                      </span>
+                                    );
+                                  }
+                                  if (req.status === 'rejected') {
+                                    return (
+                                      <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border bg-rose-50 text-rose-600 border-rose-200">
+                                        Denied
+                                      </span>
+                                    );
+                                  }
+                                  const isPast = isPTODatePassed(req.endDate, req.startDate);
+                                  const isDeducted = req.isDeducted ?? isPast;
+                                  if (isDeducted) {
+                                    return (
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border bg-emerald-50 text-emerald-700 border-emerald-200">
+                                          Approved & Deducted
+                                        </span>
+                                        <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider">
+                                          Applied to balance
+                                        </span>
+                                      </div>
+                                    );
+                                  }
+                                  return (
+                                    <div className="flex flex-col items-center gap-0.5">
+                                      <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest inline-block border bg-sky-50 text-sky-700 border-sky-200">
+                                        Approved (Scheduled)
+                                      </span>
+                                      <span className="text-[8px] text-amber-600 font-bold uppercase tracking-wider">
+                                        Deducts after {req.endDate || req.startDate}
+                                      </span>
+                                    </div>
+                                  );
+                                })()}
                               </td>
 
                               <td className="px-6 py-4 text-right">
@@ -2678,13 +2940,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                         <div className="flex-1">
                           <h3 className="text-lg font-bold text-slate-800">{req.employeeName}</h3>
                           <div className="flex items-center gap-2 mt-0.5">
-                            <span className={cn(
-                              "text-[10px] font-black uppercase tracking-widest",
-                              req.status === 'pending' ? "text-amber-600" :
-                              req.status === 'approved' ? "text-zrg-green" : "text-zrg-orange"
-                            )}>
-                              {req.status}
-                            </span>
+                            {(() => {
+                              if (req.status === 'pending') {
+                                return (
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-amber-600">
+                                    Pending
+                                  </span>
+                                );
+                              }
+                              if (req.status === 'rejected') {
+                                return (
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-rose-600">
+                                    Denied
+                                  </span>
+                                );
+                              }
+                              const isPast = isPTODatePassed(req.endDate, req.startDate);
+                              const isDeducted = req.isDeducted ?? isPast;
+                              return (
+                                <span className={cn(
+                                  "text-[10px] font-black uppercase tracking-widest",
+                                  isDeducted ? "text-zrg-green" : "text-sky-600"
+                                )}>
+                                  {isDeducted ? "Approved & Deducted" : `Approved (Deducts after ${req.endDate || req.startDate})`}
+                                </span>
+                              );
+                            })()}
                             <span className="text-[10px] text-slate-300">•</span>
                             <span className="text-[10px] text-zrg-blue font-black uppercase tracking-widest">{req.hoursRequested} Hours</span>
                           </div>
@@ -2822,21 +3103,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
                           </code>
                         </td>
                         <td className="px-8 py-4">
-                          <div className="flex items-center gap-2">
-                            <span className={cn(
-                              "font-black text-sm tabular-nums",
-                              (emp.ptoBalance || 0) < 10 ? "text-zrg-orange" : "text-zrg-green"
-                            )}>
-                              {(emp.ptoBalance || 0).toFixed(2)}
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">HRS</span>
-                          </div>
+                          {(() => {
+                            const upcomingApproved = ptoRequests.filter(r => 
+                              r.employeeId === emp.id && 
+                              r.status === 'approved' && 
+                              !isPTODatePassed(r.endDate, r.startDate)
+                            );
+                            const upcomingHours = upcomingApproved.reduce((sum, r) => sum + (Number(r.hoursRequested) || 0), 0);
+                            const netProjected = (emp.ptoBalance || 0) - upcomingHours;
+
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-2">
+                                  <span className={cn(
+                                    "font-black text-sm tabular-nums",
+                                    (emp.ptoBalance || 0) < 10 ? "text-zrg-orange" : "text-zrg-green"
+                                  )}>
+                                    {(emp.ptoBalance || 0).toFixed(2)}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">HRS</span>
+                                </div>
+                                {upcomingHours > 0 && (
+                                  <div 
+                                    className="inline-flex items-center gap-1 bg-amber-50 border border-amber-200/90 px-2 py-0.5 rounded-md text-[9px] font-bold text-amber-700 whitespace-nowrap cursor-help"
+                                    title={`Approved upcoming PTO (${upcomingHours.toFixed(1)} hrs) will deduct from balance after the date taken. Net remaining after leave: ${netProjected.toFixed(2)} hrs.`}
+                                  >
+                                    <Calendar size={10} className="text-amber-500 shrink-0" />
+                                    <span>{upcomingHours.toFixed(1)} hrs scheduled</span>
+                                    <span className="text-slate-400 font-normal">• Net: {netProjected.toFixed(2)}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="px-8 py-4 text-right">
                           <div className="flex justify-end gap-2 text-zrg-navy">
                             <button 
-                              onClick={() => handleUpdatePTO(emp.id, emp.name)}
+                              onClick={() => openAdjustPTOModal(emp)}
                               className="bg-zrg-blue/10 text-zrg-blue hover:bg-zrg-blue hover:text-white px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all"
+                              title="Add or adjust PTO balance"
                             >
                               Add Hours
                             </button>
@@ -2996,7 +3302,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
         </main>
       </div>
 
-      <AnimatePresence mode="wait">
+      {/* Modals & Overlays */}
+      <AnimatePresence>
         {editingLog && (
           <EditLogModal
             key="edit-log-modal"
@@ -3015,6 +3322,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
             onClose={() => setEditingEmployee(null)}
             onSave={handleSaveEmployee}
             onDelete={handleDeleteEmployee}
+            upcomingPTOHours={(() => {
+              const upcoming = ptoRequests.filter(r => 
+                r.employeeId === editingEmployee.id && 
+                r.status === 'approved' && 
+                !isPTODatePassed(r.endDate, r.startDate)
+              );
+              return upcoming.reduce((sum, r) => sum + (Number(r.hoursRequested) || 0), 0);
+            })()}
+          />
+        )}
+        {ptoAdjustmentTarget && (
+          <AdjustPTOModal
+            key="adjust-pto-modal"
+            isOpen={!!ptoAdjustmentTarget}
+            onClose={() => setPtoAdjustmentTarget(null)}
+            target={ptoAdjustmentTarget}
+            amount={ptoAdjustInput}
+            onAmountChange={setPtoAdjustInput}
+            onConfirm={handleSavePTOAdjustment}
+            isSubmitting={isSubmittingPTOAdjust}
           />
         )}
         {isRegisterModalOpen && (
@@ -3211,7 +3538,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onBack }) => {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
+      {/* Floating Notifications */}
+      <AnimatePresence>
         {toastNotification && (
           <motion.div 
             initial={{ opacity: 0, y: 20, scale: 0.95 }}

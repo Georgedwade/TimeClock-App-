@@ -50,4 +50,6 @@ export interface PTORequest {
   note?: string;
   managerNote?: string;
   createdAt?: string;
+  isDeducted?: boolean; // Whether the hours have been deducted from employee.ptoBalance
+  deductedAt?: string;  // ISO timestamp of when deduction was applied
 }

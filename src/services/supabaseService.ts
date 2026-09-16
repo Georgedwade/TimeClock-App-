@@ -1,12 +1,16 @@
 import { LogType, Employee, TimeLog, PTORequest, HolidayRecord } from '../types';
+import { isPTODatePassed } from '../utils/ptoUtils';
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { 
   getFirestore, 
+  initializeFirestore,
+  setLogLevel,
   collection, 
   doc, 
   getDocs, 
   getDoc, 
+  getDocFromServer,
   setDoc, 
   addDoc, 
   updateDoc, 
@@ -20,6 +24,13 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+// Configure log level to suppress harmless internal transport retry warnings
+try {
+  setLogLevel('error');
+} catch (e) {
+  // ignore if already configured
+}
+
 // Initialize Firebase App safely with fallback
 let app: any;
 export let db: any = null;
@@ -29,7 +40,14 @@ let isFirebaseBlocked = false;
 try {
   if (firebaseConfig && firebaseConfig.apiKey) {
     app = initializeApp(firebaseConfig);
-    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    // Initialize Firestore with long-polling transport to prevent RPC Listen stream disconnect errors in sandboxed iframes
+    try {
+      db = initializeFirestore(app, {
+        experimentalForceLongPolling: true,
+      }, firebaseConfig.firestoreDatabaseId);
+    } catch {
+      db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
     auth = getAuth(app);
   } else {
     throw new Error("firebaseConfig properties are missing in configuration file.");
@@ -38,6 +56,19 @@ try {
   console.error("Firebase initialization failed. Directing to Safe Local Storage fallback mode.", e);
   isFirebaseBlocked = true;
 }
+
+// Validate connection to Firestore as specified in skill guidelines
+async function testConnection() {
+  if (!db) return;
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn("Firebase client is currently offline. Safe local storage fallback active.");
+    }
+  }
+}
+testConnection();
 
 // Memory Cache Fallback for sandboxed iframes or environments blocking cookies/localstorage
 const memoryCache: Record<string, string> = {};
@@ -70,6 +101,15 @@ const listeners: { [table: string]: Set<SubCallback> } = {
   pto_requests: new Set(),
   settings: new Set(),
   holiday_records: new Set(),
+};
+
+// Shared active stream registry to prevent redundant listeners from opening multiple RPC streams
+const activeFirestoreUnsubs: { [table: string]: (() => void) | null } = {
+  employees: null,
+  logs: null,
+  pto_requests: null,
+  settings: null,
+  holiday_records: null,
 };
 
 function triggerListeners(table: string, data: any) {
@@ -143,12 +183,16 @@ function parsePTORequests(raw: any): PTORequest[] {
     id: p.id,
     employeeId: p.employeeId || '',
     employeeName: p.employeeName || '',
+    employeeEmail: p.employeeEmail || '',
     startDate: p.startDate || '',
     endDate: p.endDate || '',
     hoursRequested: Number(p.hoursRequested || 0),
     status: (p.status || 'pending') as 'pending' | 'approved' | 'rejected',
     note: p.note || '',
     managerNote: p.managerNote || '',
+    createdAt: p.createdAt || undefined,
+    isDeducted: p.isDeducted !== undefined ? Boolean(p.isDeducted) : undefined,
+    deductedAt: p.deductedAt || undefined,
   }));
 }
 
@@ -419,13 +463,16 @@ export const supabaseService = {
     // Provide initial render from cache immediately for rapid loading
     const raw = safeLocalStorage.getItem('zrg_employees');
     if (raw) {
-      callback(parseEmployees(JSON.parse(raw)));
+      try {
+        callback(parseEmployees(JSON.parse(raw)));
+      } catch (e) {
+        console.error('Error parsing cached employees:', e);
+      }
     }
 
-    let unsub = () => {};
-    if (!isFirebaseBlocked) {
+    if (!activeFirestoreUnsubs.employees && !isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(collection(db, 'employees'), (snapshot) => {
+        activeFirestoreUnsubs.employees = onSnapshot(collection(db, 'employees'), (snapshot) => {
           isFirebaseBlocked = false;
           const emps = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -440,12 +487,12 @@ export const supabaseService = {
             } as Employee;
           });
           safeLocalStorage.setItem('zrg_employees', JSON.stringify(emps));
-          callback(emps);
+          triggerListeners('employees', emps);
         }, (error) => {
           handleFirestoreError(error, OperationType.GET, 'employees');
           // Silently return existing cache
           const localStr = safeLocalStorage.getItem('zrg_employees');
-          if (localStr) callback(parseEmployees(JSON.parse(localStr)));
+          if (localStr) triggerListeners('employees', parseEmployees(JSON.parse(localStr)));
         });
       } catch (e) {
         console.warn('Subscription setup failed:', e);
@@ -454,7 +501,10 @@ export const supabaseService = {
 
     return () => {
       listeners.employees.delete(callback);
-      unsub();
+      if (listeners.employees.size === 0 && activeFirestoreUnsubs.employees) {
+        activeFirestoreUnsubs.employees();
+        activeFirestoreUnsubs.employees = null;
+      }
     };
   },
 
@@ -621,13 +671,16 @@ export const supabaseService = {
 
     const raw = safeLocalStorage.getItem('zrg_logs');
     if (raw) {
-      callback(parseLogs(JSON.parse(raw)));
+      try {
+        callback(parseLogs(JSON.parse(raw)));
+      } catch (e) {
+        console.error('Error parsing cached logs:', e);
+      }
     }
 
-    let unsub = () => {};
-    if (!isFirebaseBlocked && db) {
+    if (!activeFirestoreUnsubs.logs && !isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(query(collection(db, 'logs'), orderBy('timestamp', 'desc')), (snapshot) => {
+        activeFirestoreUnsubs.logs = onSnapshot(query(collection(db, 'logs'), orderBy('timestamp', 'desc')), (snapshot) => {
           isFirebaseBlocked = false;
           const logs = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -658,11 +711,11 @@ export const supabaseService = {
           } catch (e) {
             console.warn('Could not cache logs to storage:', e);
           }
-          callback(logs);
+          triggerListeners('logs', logs);
         }, (error) => {
           handleFirestoreError(error, OperationType.GET, 'logs');
           const localStr = safeLocalStorage.getItem('zrg_logs');
-          if (localStr) callback(parseLogs(JSON.parse(localStr)));
+          if (localStr) triggerListeners('logs', parseLogs(JSON.parse(localStr)));
         });
       } catch (e) {
         console.warn('Logs subscription setup error:', e);
@@ -671,7 +724,10 @@ export const supabaseService = {
 
     return () => {
       listeners.logs.delete(callback);
-      unsub();
+      if (listeners.logs.size === 0 && activeFirestoreUnsubs.logs) {
+        activeFirestoreUnsubs.logs();
+        activeFirestoreUnsubs.logs = null;
+      }
     };
   },
 
@@ -687,12 +743,16 @@ export const supabaseService = {
             id: doc.id,
             employeeId: data.employeeId || '',
             employeeName: data.employeeName || '',
+            employeeEmail: data.employeeEmail || '',
             startDate: data.startDate || '',
             endDate: data.endDate || '',
             hoursRequested: Number(data.hoursRequested || 0),
             status: data.status || 'pending',
             note: data.note || '',
             managerNote: data.managerNote || '',
+            createdAt: data.createdAt || undefined,
+            isDeducted: data.isDeducted !== undefined ? Boolean(data.isDeducted) : undefined,
+            deductedAt: data.deductedAt || undefined,
           } as PTORequest;
         });
 
@@ -708,7 +768,7 @@ export const supabaseService = {
   },
 
   addPTORequest: async (request: Omit<PTORequest, 'id'>) => {
-    const payload = {
+    const payload: any = {
       employeeId: (request.employeeId || '').trim(),
       employeeName: (request.employeeName || '').trim(),
       employeeEmail: (request.employeeEmail || '').trim(),
@@ -718,7 +778,12 @@ export const supabaseService = {
       status: (request.status || 'pending') as 'pending' | 'approved' | 'rejected',
       note: request.note || '',
       managerNote: request.managerNote || '',
+      createdAt: request.createdAt || new Date().toISOString(),
+      isDeducted: request.isDeducted !== undefined ? Boolean(request.isDeducted) : false,
     };
+    if (request.deductedAt) {
+      payload.deductedAt = request.deductedAt;
+    }
 
     if (!isFirebaseBlocked && db && !request.employeeId.startsWith('local_') && !request.employeeId.startsWith('seed_')) {
       try {
@@ -751,15 +816,29 @@ export const supabaseService = {
     return newReq;
   },
 
-  updatePTORequestStatus: async (requestId: string, status: 'approved' | 'rejected', managerNote?: string) => {
+  updatePTORequestStatus: async (
+    requestId: string, 
+    status: 'approved' | 'rejected', 
+    managerNote?: string,
+    isDeducted?: boolean,
+    deductedAt?: string
+  ) => {
+    const updatePayload: Record<string, any> = {
+      status,
+      managerNote: managerNote || '',
+      updatedAt: Timestamp.now()
+    };
+    if (isDeducted !== undefined) {
+      updatePayload.isDeducted = isDeducted;
+    }
+    if (deductedAt !== undefined) {
+      updatePayload.deductedAt = deductedAt;
+    }
+
     if (!isFirebaseBlocked && !requestId.startsWith('local_')) {
       try {
         const docRef = doc(db, 'pto_requests', requestId);
-        await updateDoc(docRef, {
-          status,
-          managerNote: managerNote || '',
-          updatedAt: Timestamp.now()
-        });
+        await updateDoc(docRef, updatePayload);
       } catch (e) {
         handleFirestoreError(e, OperationType.UPDATE, `pto_requests/${requestId}`);
       }
@@ -768,9 +847,78 @@ export const supabaseService = {
     // Local Fallback
     const raw = safeLocalStorage.getItem('zrg_pto_requests');
     let reqs = raw ? parsePTORequests(JSON.parse(raw)) : [];
-    reqs = reqs.map(req => req.id === requestId ? { ...req, status, managerNote: managerNote || '' } : req);
+    reqs = reqs.map(req => req.id === requestId ? { 
+      ...req, 
+      status, 
+      managerNote: managerNote || '',
+      ...(isDeducted !== undefined ? { isDeducted } : {}),
+      ...(deductedAt !== undefined ? { deductedAt } : {})
+    } : req);
     safeLocalStorage.setItem('zrg_pto_requests', JSON.stringify(reqs));
     triggerListeners('pto_requests', reqs);
+  },
+
+  updatePTORequest: async (requestId: string, updates: Partial<PTORequest>) => {
+    const updatePayload: Record<string, any> = {
+      ...updates,
+      updatedAt: Timestamp.now()
+    };
+
+    if (!isFirebaseBlocked && !requestId.startsWith('local_')) {
+      try {
+        const docRef = doc(db, 'pto_requests', requestId);
+        await updateDoc(docRef, updatePayload);
+      } catch (e) {
+        handleFirestoreError(e, OperationType.UPDATE, `pto_requests/${requestId}`);
+      }
+    }
+
+    // Local Fallback
+    const raw = safeLocalStorage.getItem('zrg_pto_requests');
+    let reqs = raw ? parsePTORequests(JSON.parse(raw)) : [];
+    reqs = reqs.map(req => req.id === requestId ? { ...req, ...updates } : req);
+    safeLocalStorage.setItem('zrg_pto_requests', JSON.stringify(reqs));
+    triggerListeners('pto_requests', reqs);
+  },
+
+  /**
+   * Automatically checks for approved PTO requests whose date has passed (strictly after
+   * the date the PTO was taken) and executes the deduction from employee.ptoBalance.
+   */
+  processDuePTODeductions: async (): Promise<number> => {
+    try {
+      const ptoRequests = await supabaseService.getPTORequests();
+      // Find approved requests where the PTO date has now passed and hours have not been deducted yet
+      const dueRequests = ptoRequests.filter(req => {
+        if (req.status !== 'approved') return false;
+        if (req.isDeducted === true) return false;
+        // If isDeducted was not explicitly set, legacy requests from before today were already deducted historically
+        if (req.isDeducted === undefined) {
+          return false;
+        }
+        // Check if strictly after the date the PTO was taken
+        return isPTODatePassed(req.endDate, req.startDate);
+      });
+
+      if (dueRequests.length === 0) return 0;
+
+      for (const req of dueRequests) {
+        // 1. Deduct requested hours from employee PTO balance
+        await supabaseService.updateEmployeePTO(req.employeeId, -req.hoursRequested);
+        // 2. Mark request as deducted
+        await supabaseService.updatePTORequestStatus(
+          req.id!,
+          'approved',
+          req.managerNote,
+          true,
+          new Date().toISOString()
+        );
+      }
+      return dueRequests.length;
+    } catch (err) {
+      console.error('Error processing due PTO deductions:', err);
+      return 0;
+    }
   },
 
   deletePTORequest: async (requestId: string) => {
@@ -795,13 +943,16 @@ export const supabaseService = {
 
     const raw = safeLocalStorage.getItem('zrg_pto_requests');
     if (raw) {
-      callback(parsePTORequests(JSON.parse(raw)));
+      try {
+        callback(parsePTORequests(JSON.parse(raw)));
+      } catch (e) {
+        console.error('Error parsing cached pto requests:', e);
+      }
     }
 
-    let unsub = () => {};
-    if (!isFirebaseBlocked) {
+    if (!activeFirestoreUnsubs.pto_requests && !isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(collection(db, 'pto_requests'), (snapshot) => {
+        activeFirestoreUnsubs.pto_requests = onSnapshot(collection(db, 'pto_requests'), (snapshot) => {
           isFirebaseBlocked = false;
           const reqs = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -818,11 +969,11 @@ export const supabaseService = {
             } as PTORequest;
           });
           safeLocalStorage.setItem('zrg_pto_requests', JSON.stringify(reqs));
-          callback(reqs);
+          triggerListeners('pto_requests', reqs);
         }, (error) => {
           handleFirestoreError(error, OperationType.GET, 'pto_requests');
           const localStr = safeLocalStorage.getItem('zrg_pto_requests');
-          if (localStr) callback(parsePTORequests(JSON.parse(localStr)));
+          if (localStr) triggerListeners('pto_requests', parsePTORequests(JSON.parse(localStr)));
         });
       } catch (e) {
         console.warn('PTO sub setup failed:', e);
@@ -831,7 +982,10 @@ export const supabaseService = {
 
     return () => {
       listeners.pto_requests.delete(callback);
-      unsub();
+      if (listeners.pto_requests.size === 0 && activeFirestoreUnsubs.pto_requests) {
+        activeFirestoreUnsubs.pto_requests();
+        activeFirestoreUnsubs.pto_requests = null;
+      }
     };
   },
 
@@ -955,13 +1109,16 @@ export const supabaseService = {
 
     const raw = safeLocalStorage.getItem('zrg_holiday_records');
     if (raw) {
-      callback(parseHolidayRecords(JSON.parse(raw)));
+      try {
+        callback(parseHolidayRecords(JSON.parse(raw)));
+      } catch (e) {
+        console.error('Error parsing cached holiday records:', e);
+      }
     }
 
-    let unsub = () => {};
-    if (!isFirebaseBlocked && db) {
+    if (!activeFirestoreUnsubs.holiday_records && !isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(collection(db, 'holiday_records'), (snapshot) => {
+        activeFirestoreUnsubs.holiday_records = onSnapshot(collection(db, 'holiday_records'), (snapshot) => {
           isFirebaseBlocked = false;
           const records = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -978,11 +1135,11 @@ export const supabaseService = {
           }).sort((a, b) => b.date.localeCompare(a.date));
 
           safeLocalStorage.setItem('zrg_holiday_records', JSON.stringify(records));
-          callback(records);
+          triggerListeners('holiday_records', records);
         }, (error) => {
           handleFirestoreError(error, OperationType.GET, 'holiday_records');
           const localStr = safeLocalStorage.getItem('zrg_holiday_records');
-          if (localStr) callback(parseHolidayRecords(JSON.parse(localStr)));
+          if (localStr) triggerListeners('holiday_records', parseHolidayRecords(JSON.parse(localStr)));
         });
       } catch (e) {
         console.warn('Holiday sub setup failed:', e);
@@ -991,7 +1148,10 @@ export const supabaseService = {
 
     return () => {
       listeners.holiday_records.delete(callback);
-      unsub();
+      if (listeners.holiday_records.size === 0 && activeFirestoreUnsubs.holiday_records) {
+        activeFirestoreUnsubs.holiday_records();
+        activeFirestoreUnsubs.holiday_records = null;
+      }
     };
   },
 
@@ -1047,23 +1207,22 @@ export const supabaseService = {
       } catch {}
     }
 
-    let unsub = () => {};
-    if (!isFirebaseBlocked) {
+    if (!activeFirestoreUnsubs.settings && !isFirebaseBlocked && db) {
       try {
-        unsub = onSnapshot(doc(db, 'settings', 'config'), (docSnap) => {
+        activeFirestoreUnsubs.settings = onSnapshot(doc(db, 'settings', 'config'), (docSnap) => {
           isFirebaseBlocked = false;
           if (docSnap.exists()) {
             const data = docSnap.data();
             const setting = { requirePhotoVerification: data.requirePhotoVerification !== false };
             safeLocalStorage.setItem('zrg_settings', JSON.stringify(setting));
-            callback(setting);
+            triggerListeners('settings', setting);
           }
         }, (error) => {
           console.warn('Settings subscription error fallback:', error);
           const localStr = safeLocalStorage.getItem('zrg_settings');
           if (localStr) {
             try {
-              callback(JSON.parse(localStr));
+              triggerListeners('settings', JSON.parse(localStr));
             } catch {}
           }
         });
@@ -1074,7 +1233,10 @@ export const supabaseService = {
 
     return () => {
       listeners.settings.delete(callback);
-      unsub();
+      if (listeners.settings.size === 0 && activeFirestoreUnsubs.settings) {
+        activeFirestoreUnsubs.settings();
+        activeFirestoreUnsubs.settings = null;
+      }
     };
   },
 

@@ -69,15 +69,16 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen font-sans text-zrg-navy bg-white overflow-hidden flex flex-col">
-      <AnimatePresence mode="wait">
+    <div className="relative h-screen w-screen font-sans text-zrg-navy bg-white overflow-hidden flex flex-col">
+      <AnimatePresence initial={false}>
         {view === 'kiosk' ? (
           <motion.div 
             key="kiosk"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="flex-1 flex flex-col"
+            transition={{ duration: 0.15 }}
+            className="w-full h-full flex flex-col"
           >
             <KioskView onManagerAccess={() => setShowManagerPin(true)} />
           </motion.div>
@@ -87,7 +88,8 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="flex-1 flex flex-col"
+            transition={{ duration: 0.15 }}
+            className="w-full h-full flex flex-col"
           >
             <DashboardView onBack={() => setView('kiosk')} />
           </motion.div>
